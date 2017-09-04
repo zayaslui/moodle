@@ -1,89 +1,109 @@
-<?PHP // $Id$
+<?php
 
-    require_once("../../config.php");
+// This file is part of Moodle - http://moodle.org/
+//
+// Moodle is free software: you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// Moodle is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU General Public License for more details.
+//
+// You should have received a copy of the GNU General Public License
+// along with Moodle.  If not, see <http://www.gnu.org/licenses/>.
 
-    require_variable($id);   // course
+/**
+ * List of all resources in course
+ *
+ * @package    mod_resource
+ * @copyright  1999 onwards Martin Dougiamas (http://dougiamas.com)
+ * @license    http://www.gnu.org/copyleft/gpl.html GNU GPL v3 or later
+ */
 
-    if (!empty($CFG->forcelogin)) {
-        require_login();
-    }
+require('../../config.php');
 
-    if (! $course = get_record("course", "id", $id)) {
-        error("Course ID is incorrect");
-    }
+$id = required_param('id', PARAM_INT); // course id
 
-    if ($course->category) {
-        require_login($course->id);
-        $navigation = "<A HREF=\"../../course/view.php?id=$course->id\">$course->shortname</A> ->";
-    }
+$course = $DB->get_record('course', array('id'=>$id), '*', MUST_EXIST);
 
-    add_to_log($course->id, "resource", "view all", "index.php?id=$course->id", "");
+require_course_login($course, true);
+$PAGE->set_pagelayout('incourse');
 
-    $strresource = get_string("modulename", "resource");
-    $strresources = get_string("modulenameplural", "resource");
-    $strweek = get_string("week");
-    $strtopic = get_string("topic");
-    $strname = get_string("name");
-    $strsummary = get_string("summary");
-    $strlastmodified = get_string("lastmodified");
+$params = array(
+    'context' => context_course::instance($course->id)
+);
+$event = \mod_resource\event\course_module_instance_list_viewed::create($params);
+$event->add_record_snapshot('course', $course);
+$event->trigger();
 
-    print_header("$course->shortname: $strresources", "$course->fullname", "$navigation $strresources", 
-                 "", "", true, "", navmenu($course));
+$strresource     = get_string('modulename', 'resource');
+$strresources    = get_string('modulenameplural', 'resource');
+$strsectionname  = get_string('sectionname', 'format_'.$course->format);
+$strname         = get_string('name');
+$strintro        = get_string('moduleintro');
+$strlastmodified = get_string('lastmodified');
 
-    if (! $resources = get_all_instances_in_course("resource", $course)) {
-        notice("There are no resources", "../../course/view.php?id=$course->id");
-        exit;
-    }
+$PAGE->set_url('/mod/resource/index.php', array('id' => $course->id));
+$PAGE->set_title($course->shortname.': '.$strresources);
+$PAGE->set_heading($course->fullname);
+$PAGE->navbar->add($strresources);
+echo $OUTPUT->header();
+echo $OUTPUT->heading($strresources);
 
-    if ($course->format == "weeks") {
-        $table->head  = array ($strweek, $strname, $strsummary);
-        $table->align = array ("CENTER", "LEFT", "LEFT");
-    } else if ($course->format == "topics") {
-        $table->head  = array ($strtopic, $strname, $strsummary);
-        $table->align = array ("CENTER", "LEFT", "LEFT");
-    } else {
-        $table->head  = array ($strlastmodified, $strname, $strsummary);
-        $table->align = array ("LEFT", "LEFT", "LEFT");
-    }
+if (!$resources = get_all_instances_in_course('resource', $course)) {
+    notice(get_string('thereareno', 'moodle', $strresources), "$CFG->wwwroot/course/view.php?id=$course->id");
+    exit;
+}
 
-    $currentsection = "";
-    foreach ($resources as $resource) {
-        if ($course->format == "weeks" or $course->format == "topics") {
-            $printsection = "";
-            if ($resource->section !== $currentsection) {
-                if ($resource->section) {
-                    $printsection = $resource->section;
-                }
-                if ($currentsection !== "") {
-                    $table->data[] = 'hr';
-                }
-                $currentsection = $resource->section;
+$usesections = course_format_uses_sections($course->format);
+
+$table = new html_table();
+$table->attributes['class'] = 'generaltable mod_index';
+
+if ($usesections) {
+    $table->head  = array ($strsectionname, $strname, $strintro);
+    $table->align = array ('center', 'left', 'left');
+} else {
+    $table->head  = array ($strlastmodified, $strname, $strintro);
+    $table->align = array ('left', 'left', 'left');
+}
+
+$modinfo = get_fast_modinfo($course);
+$currentsection = '';
+foreach ($resources as $resource) {
+    $cm = $modinfo->cms[$resource->coursemodule];
+    if ($usesections) {
+        $printsection = '';
+        if ($resource->section !== $currentsection) {
+            if ($resource->section) {
+                $printsection = get_section_name($course, $resource->section);
             }
-        } else {
-            $printsection = '<span class="smallinfo">'.userdate($resource->timemodified)."</span>";
+            if ($currentsection !== '') {
+                $table->data[] = 'hr';
+            }
+            $currentsection = $resource->section;
         }
-        if (!empty($resource->extra)) {
-            $extra = urldecode($resource->extra);
-        } else {
-            $extra = "";
-        }
-        if (!$resource->visible) {      // Show dimmed if the mod is hidden
-           $table->data[] = array ($printsection, 
-                "<a class=\"dimmed\" $extra href=\"view.php?id=$resource->coursemodule\">$resource->name</a>",
-                text_to_html($resource->summary) );
-
-        } else {                        //Show normal if the mod is visible
-           $table->data[] = array ($printsection, 
-                "<a $extra href=\"view.php?id=$resource->coursemodule\">$resource->name</a>",
-                text_to_html($resource->summary) );
-        }
+    } else {
+        $printsection = '<span class="smallinfo">'.userdate($resource->timemodified)."</span>";
     }
 
-    echo "<br />";
+    $extra = empty($cm->extra) ? '' : $cm->extra;
+    $icon = '';
+    if (!empty($cm->icon)) {
+        // each resource file has an icon in 2.0
+        $icon = $OUTPUT->pix_icon($cm->icon, get_string('modulename', $cm->modname));
+    }
 
-    print_table($table);
+    $class = $resource->visible ? '' : 'class="dimmed"'; // hidden modules are dimmed
+    $table->data[] = array (
+        $printsection,
+        "<a $class $extra href=\"view.php?id=$cm->id\">".$icon.format_string($resource->name)."</a>",
+        format_module_intro('resource', $resource, $cm->id));
+}
 
-    print_footer($course);
- 
-?>
+echo html_writer::table($table);
 
+echo $OUTPUT->footer();

@@ -1,115 +1,104 @@
-<?PHP  // $Id$
+<?php
+// This file is part of Moodle - http://moodle.org/
+//
+// Moodle is free software: you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// Moodle is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU General Public License for more details.
+//
+// You should have received a copy of the GNU General Public License
+// along with Moodle.  If not, see <http://www.gnu.org/licenses/>.
 
-// This script uses installed report plugins to print quiz reports
+// This script uses installed report plugins to print scorm reports.
 
-    require_once("../../config.php");
-    require_once("lib.php");
+require_once("../../config.php");
+require_once($CFG->libdir.'/tablelib.php');
+require_once($CFG->dirroot.'/mod/scorm/locallib.php');
+require_once($CFG->dirroot.'/mod/scorm/reportsettings_form.php');
+require_once($CFG->dirroot.'/mod/scorm/report/reportlib.php');
+require_once($CFG->libdir.'/formslib.php');
 
-    optional_variable($id);    // Course Module ID, or
+define('SCORM_REPORT_DEFAULT_PAGE_SIZE', 20);
+define('SCORM_REPORT_ATTEMPTS_ALL_STUDENTS', 0);
+define('SCORM_REPORT_ATTEMPTS_STUDENTS_WITH', 1);
+define('SCORM_REPORT_ATTEMPTS_STUDENTS_WITH_NO', 2);
 
-    if ($id) {
-        if (! $cm = get_record("course_modules", "id", $id)) {
-            error("Course Module ID was incorrect");
-        }
-    
-        if (! $course = get_record("course", "id", $cm->course)) {
-            error("Course is misconfigured");
-        }
-    
-        if (! $scorm = get_record("scorm", "id", $cm->instance)) {
-            error("Course module is incorrect");
-        }
+$id = required_param('id', PARAM_INT);// Course Module ID, or ...
+$download = optional_param('download', '', PARAM_RAW);
+$mode = optional_param('mode', '', PARAM_ALPHA); // Report mode.
 
-    } else {
-        if (! $scorm = get_record("scorm", "id", $q)) {
-            error("Course module is incorrect");
-        }
-        if (! $course = get_record("course", "id", $scorm->course)) {
-            error("Course is misconfigured");
-        }
-        if (! $cm = get_coursemodule_from_instance("scorm", $scorm->id, $course->id)) {
-            error("Course Module ID was incorrect");
-        }
-    }
+$cm = get_coursemodule_from_id('scorm', $id, 0, false, MUST_EXIST);
+$course = $DB->get_record('course', array('id' => $cm->course), '*', MUST_EXIST);
+$scorm = $DB->get_record('scorm', array('id' => $cm->instance), '*', MUST_EXIST);
 
-    require_login($course->id);
+$contextmodule = context_module::instance($cm->id);
+$reportlist = scorm_report_list($contextmodule);
 
-    if (!isteacher($course->id)) {
-        error("You are not allowed to use this script");
-    }
+$url = new moodle_url('/mod/scorm/report.php');
 
-    add_to_log($course->id, "scorm", "report", "report.php?id=$cm->id", "$scorm->id");
+$url->param('id', $id);
+if (empty($mode)) {
+    $mode = reset($reportlist);
+} else if (!in_array($mode, $reportlist)) {
+    print_error('erroraccessingreport', 'scorm');
+}
+$url->param('mode', $mode);
 
-/// Print the page header
-    if (empty($noheader)) {
+$PAGE->set_url($url);
 
-        if ($course->category) {
-            $navigation = "<a href=\"../../course/view.php?id=$course->id\">$course->shortname</a> ->";
-        }
-    
-        $strscorms = get_string("modulenameplural", "scorm");
-        $strscorm  = get_string("modulename", "scorm");
-        $strreport  = get_string("report", "scorm");
-    
-        print_header("$course->shortname: $scorm->name", "$course->fullname",
-                     "$navigation <A HREF=index.php?id=$course->id>$strscorms</A> 
-                      -> <a href=\"view.php?id=$cm->id\">$scorm->name</a> -> $strreport", 
-                     "", "", true);
-    
-        print_heading($scorm->name);
-    }
-    if ($scoes =get_records_select("scorm_scoes","scorm='$scorm->id' ORDER BY id")) {
-    	if ($sco_users=get_records_select("scorm_sco_users", "scormid='$scorm->id' GROUP BY userid")) {
-        		
-        	$strname  = get_string("name");
+require_login($course, false, $cm);
+$PAGE->set_pagelayout('report');
 
-        	$table->head = array("&nbsp;", $strname);
-        	$table->align = array("center", "left");
-        	$table->wrap = array("nowrap", "nowrap");
-        	$table->width = "100%";
-        	$table->size = array(10, "*");
-        	foreach ($scoes as $sco) {
-        		if ($sco->launch!="") {
-        		    $table->head[]=scorm_string_round($sco->title);
-        		    $table->align[] = "center";
-        			$table->wrap[] = "nowrap";
-        			$table->size[] = "*";
-        		}
-        	}
+require_capability('mod/scorm:viewreport', $contextmodule);
 
-        	foreach ($sco_users as $sco_user) {
-        		$user_data=scorm_get_scoes_records($sco_user);
-            	$picture = print_user_picture($sco_user->userid, $course->id, $user_data->picture, false, true);
-            	$row="";
-    			$row[] = $picture;
-    			if (is_array($user_data)) {
-    				$data = current($user_data);
-    				$row[] = "<a href=\"$CFG->wwwroot/user/view.php?id=$data->userid&course=$course->id\">".
-    					 "$data->firstname $data->lastname</a>";
-    				foreach ($user_data as $data) {
-    				    $scoreview = "";
-    				    if ($data->cmi_core_score_raw > 0)
-    				    	$scoreview = "<br />".get_string("score","scorm").":&nbsp;".$data->cmi_core_score_raw;
-    				    if ( $data->cmi_core_lesson_status == "")
-    		    			$data->cmi_core_lesson_status = "not attempted";
-        		    	    $row[]="<img src=\"pix/".scorm_remove_spaces($data->cmi_core_lesson_status).".gif\" 
-    						   alt=\"".get_string(scorm_remove_spaces($data->cmi_core_lesson_status),"scorm")."\"
-    						   title=\"".get_string(scorm_remove_spaces($data->cmi_core_lesson_status),"scorm")."\">&nbsp;"
-    						   .$data->cmi_core_total_time.$scoreview;
-        			}
-        		}
-            	$table->data[] = $row; 
-        	}
-    
-        	print_table($table);
-        
-    	} else {
-    		notice("No users to report");
-    	}
-    }
-    if (empty($noheader)) {
-        print_footer($course);
-    }
+if (count($reportlist) < 1) {
+    print_error('erroraccessingreport', 'scorm');
+}
 
+// Trigger a report viewed event.
+$event = \mod_scorm\event\report_viewed::create(array(
+    'context' => $contextmodule,
+    'other' => array(
+        'scormid' => $scorm->id,
+        'mode' => $mode
+    )
+));
+$event->add_record_snapshot('course_modules', $cm);
+$event->add_record_snapshot('scorm', $scorm);
+$event->trigger();
 
-?>
+$userdata = null;
+if (!empty($download)) {
+    $noheader = true;
+}
+// Print the page header.
+if (empty($noheader)) {
+    $strreport = get_string('report', 'scorm');
+    $strattempt = get_string('attempt', 'scorm');
+
+    $PAGE->set_title("$course->shortname: ".format_string($scorm->name));
+    $PAGE->set_heading($course->fullname);
+    $PAGE->navbar->add($strreport, new moodle_url('/mod/scorm/report.php', array('id' => $cm->id)));
+
+    echo $OUTPUT->header();
+    echo $OUTPUT->heading(format_string($scorm->name));
+    $currenttab = 'reports';
+    require($CFG->dirroot . '/mod/scorm/tabs.php');
+}
+
+// Open the selected Scorm report and display it.
+$classname = "scormreport_{$mode}\\report";
+$legacyclassname = "scorm_{$mode}_report";
+$report = class_exists($classname) ? new $classname() : new $legacyclassname();
+$report->display($scorm, $cm, $course, $download); // Run the report!
+
+// Print footer.
+
+if (empty($noheader)) {
+    echo $OUTPUT->footer();
+}

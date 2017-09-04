@@ -1,128 +1,166 @@
-<?PHP // $Id$
+<?php
 
-    require_once("../config.php");
+// This file is part of Moodle - http://moodle.org/
+//
+// Moodle is free software: you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// Moodle is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU General Public License for more details.
+//
+// You should have received a copy of the GNU General Public License
+// along with Moodle.  If not, see <http://www.gnu.org/licenses/>.
 
-    optional_variable($id);
+/**
+ * Change password page.
+ *
+ * @package    core
+ * @subpackage auth
+ * @copyright  1999 onwards Martin Dougiamas  http://dougiamas.com
+ * @license    http://www.gnu.org/copyleft/gpl.html GNU GPL v3 or later
+ */
 
-    if ($id) {
-        if (!$course = get_record("course", "id", $id)) {
-            error("No such course!");
-        }
-    }
+require('../config.php');
+require_once($CFG->dirroot.'/user/lib.php');
+require_once('change_password_form.php');
+require_once($CFG->libdir.'/authlib.php');
+require_once($CFG->dirroot.'/webservice/lib.php');
 
-    if ($frm = data_submitted()) {
+$id     = optional_param('id', SITEID, PARAM_INT); // current course
+$return = optional_param('return', 0, PARAM_BOOL); // redirect after password change
 
-        validate_form($frm, $err);
+$systemcontext = context_system::instance();
 
-        check_for_restricted_user($frm->username);
+//HTTPS is required in this page when $CFG->loginhttps enabled
+$PAGE->https_required();
 
-        update_login_count();
+$PAGE->set_url('/login/change_password.php', array('id'=>$id));
 
-        if (!count((array)$err)) {
-            $username = $frm->username;
-            $password = md5($frm->newpassword1);
+$PAGE->set_context($systemcontext);
 
-            $user = get_user_info_from_db("username", $username);
-
-            if (isguest($user->id)) {
-                error("Can't change guest password!");
-            }
-            
-            if (set_field("user", "password", $password, "username", $username)) {
-                $user->password = $password;
-            } else {
-                error("Could not set the new password");
-            }
-
-            $USER = $user;
-            $USER->loggedin = true;
-            $USER->site = $CFG->wwwroot;   // for added security
-
-            set_moodle_cookie($USER->username);
-
-            reset_login_count();
-
-            $strpasswordchanged = get_string("passwordchanged");
-
-            if ($course->id) {
-                add_to_log($course->id, "user", "change password", "view.php?id=$user->id&course=$course->id", "$user->id");
-                $fullname = fullname($USER, true);
-                print_header($strpasswordchanged, $strpasswordchanged,
-                             "<A HREF=\"$CFG->wwwroot/course/view.php?id=$course->id\">$course->shortname</A> ->
-                              <A HREF=\"$CFG->wwwroot/user/index.php?id=$course->id\">".get_string("participants")."</A> ->
-                              <A HREF=\"$CFG->wwwroot/user/view.php?id=$USER->id&course=$course->id\">$fullname</A> -> $strpasswordchanged", $focus);
-                notice($strpasswordchanged, "$CFG->wwwroot/user/view.php?id=$USER->id&course=$id");
-            } else {
-                $site = get_site();
-                add_to_log($site->id, "user", "change password", "view.php?id=$user->id&course=$site->id", "$course->id");
-                print_header($strpasswordchanged, $strpasswordchanged, $strpasswordchanged, "");
-                notice($strpasswordchanged, "$CFG->wwwroot/");
-            }
-
-            print_footer();
-            exit;
-        }
-    }
-
-
-
-    if ($course->id) {
-        $frm->id = $id;
-    }
-
-    if (empty($frm->username)) {
-        $frm->username = get_moodle_cookie();
-    }
-
-    if (!empty($frm->username)) {
-        $focus = "form.password";
+if ($return) {
+    // this redirect prevents security warning because https can not POST to http pages
+    if (empty($SESSION->wantsurl)
+            or stripos(str_replace('https://', 'http://', $SESSION->wantsurl), str_replace('https://', 'http://', $CFG->wwwroot.'/login/change_password.php')) === 0) {
+        $returnto = "$CFG->wwwroot/user/preferences.php?userid=$USER->id&course=$id";
     } else {
-        $focus = "form.username";
+        $returnto = $SESSION->wantsurl;
     }
+    unset($SESSION->wantsurl);
 
-    $strchangepassword = get_string("changepassword");
-    if (!empty($course->id)) {
-        $fullname = fullname($USER, true);
-        print_header($strchangepassword, $strchangepassword,
-                     "<A HREF=\"$CFG->wwwroot/course/view.php?id=$course->id\">$course->shortname</A> ->
-                      <A HREF=\"$CFG->wwwroot/user/index.php?id=$course->id\">".get_string("participants")."</A> ->
-                      <A HREF=\"$CFG->wwwroot/user/view.php?id=$USER->id&course=$course->id\">$fullname</A> -> $strchangepassword", $focus);
-    } else {
-        print_header($strchangepassword, $strchangepassword, $strchangepassword, $focus);
-    }
-
-    print_simple_box_start("center", "", $THEME->cellheading);
-    include("change_password_form.html");
-    print_simple_box_end();
-    print_footer();
-
-
-
-
-/******************************************************************************
- * FUNCTIONS
- *****************************************************************************/
-function validate_form($frm, &$err) {
-
-    if (empty($frm->username))
-        $err->username = get_string("missingusername");
-
-    else if (empty($frm->password))
-        $err->password = get_string("missingpassword");
-
-    else if (!authenticate_user_login($frm->username, $frm->password))
-        $err->password = get_string("wrongpassword");
-
-    if (empty($frm->newpassword1))
-        $err->newpassword1 = get_string("missingnewpassword");
-
-    if (empty($frm->newpassword2))
-        $err->newpassword2 = get_string("missingnewpassword");
-
-    else if ($frm->newpassword1 <> $frm->newpassword2)
-        $err->newpassword2 = get_string("passwordsdiffer");
-
-    return;
+    redirect($returnto);
 }
 
-?>
+$strparticipants = get_string('participants');
+
+if (!$course = $DB->get_record('course', array('id'=>$id))) {
+    print_error('invalidcourseid');
+}
+
+// require proper login; guest user can not change password
+if (!isloggedin() or isguestuser()) {
+    if (empty($SESSION->wantsurl)) {
+        $SESSION->wantsurl = $CFG->httpswwwroot.'/login/change_password.php';
+    }
+    redirect(get_login_url());
+}
+
+$PAGE->set_context(context_user::instance($USER->id));
+$PAGE->set_pagelayout('admin');
+$PAGE->set_course($course);
+
+// do not require change own password cap if change forced
+if (!get_user_preferences('auth_forcepasswordchange', false)) {
+    require_capability('moodle/user:changeownpassword', $systemcontext);
+}
+
+// do not allow "Logged in as" users to change any passwords
+if (\core\session\manager::is_loggedinas()) {
+    print_error('cannotcallscript');
+}
+
+if (is_mnet_remote_user($USER)) {
+    $message = get_string('usercannotchangepassword', 'mnet');
+    if ($idprovider = $DB->get_record('mnet_host', array('id'=>$USER->mnethostid))) {
+        $message .= get_string('userchangepasswordlink', 'mnet', $idprovider);
+    }
+    print_error('userchangepasswordlink', 'mnet', '', $message);
+}
+
+// load the appropriate auth plugin
+$userauth = get_auth_plugin($USER->auth);
+
+if (!$userauth->can_change_password()) {
+    print_error('nopasswordchange', 'auth');
+}
+
+if ($changeurl = $userauth->change_password_url()) {
+    // this internal scrip not used
+    redirect($changeurl);
+}
+
+$mform = new login_change_password_form();
+$mform->set_data(array('id'=>$course->id));
+
+$navlinks = array();
+$navlinks[] = array('name' => $strparticipants, 'link' => "$CFG->wwwroot/user/index.php?id=$course->id", 'type' => 'misc');
+
+if ($mform->is_cancelled()) {
+    redirect($CFG->wwwroot.'/user/preferences.php?userid='.$USER->id.'&amp;course='.$course->id);
+} else if ($data = $mform->get_data()) {
+
+    if (!$userauth->user_update_password($USER, $data->newpassword1)) {
+        print_error('errorpasswordupdate', 'auth');
+    }
+
+    user_add_password_history($USER->id, $data->newpassword1);
+
+    if (!empty($CFG->passwordchangelogout)) {
+        \core\session\manager::kill_user_sessions($USER->id, session_id());
+    }
+
+    if (!empty($data->signoutofotherservices)) {
+        webservice::delete_user_ws_tokens($USER->id);
+    }
+
+    // Reset login lockout - we want to prevent any accidental confusion here.
+    login_unlock_account($USER);
+
+    // register success changing password
+    unset_user_preference('auth_forcepasswordchange', $USER);
+    unset_user_preference('create_password', $USER);
+
+    $strpasswordchanged = get_string('passwordchanged');
+
+    $fullname = fullname($USER, true);
+
+    $PAGE->set_title($strpasswordchanged);
+    $PAGE->set_heading(fullname($USER));
+    echo $OUTPUT->header();
+
+    notice($strpasswordchanged, new moodle_url($PAGE->url, array('return'=>1)));
+
+    echo $OUTPUT->footer();
+    exit;
+}
+
+// make sure we really are on the https page when https login required
+$PAGE->verify_https_required();
+
+$strchangepassword = get_string('changepassword');
+
+$fullname = fullname($USER, true);
+
+$PAGE->set_title($strchangepassword);
+$PAGE->set_heading($fullname);
+echo $OUTPUT->header();
+
+if (get_user_preferences('auth_forcepasswordchange')) {
+    echo $OUTPUT->notification(get_string('forcepasswordchangenotice'));
+}
+$mform->display();
+echo $OUTPUT->footer();

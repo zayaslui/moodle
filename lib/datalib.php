@@ -1,2256 +1,1854 @@
-<?PHP // $Id$
+<?php
+// This file is part of Moodle - http://moodle.org/
+//
+// Moodle is free software: you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// Moodle is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU General Public License for more details.
+//
+// You should have received a copy of the GNU General Public License
+// along with Moodle.  If not, see <http://www.gnu.org/licenses/>.
 
-/// CONSTANTS /////////////////////////////////////////////////////////////
-
-define('SITEID', 1);
-
-
-/// FUNCTIONS FOR DATABASE HANDLING  ////////////////////////////////
 /**
-* execute a given sql command string
-* 
-* Completely general function - it just runs some SQL and reports success.
-*
-* @param    type description
-*/
-function execute_sql($command, $feedback=true) {
-/// Completely general function - it just runs some SQL and reports success.
+ * Library of functions for database manipulation.
+ *
+ * Other main libraries:
+ * - weblib.php - functions that produce web output
+ * - moodlelib.php - general-purpose Moodle functions
+ *
+ * @package    core
+ * @copyright  1999 onwards Martin Dougiamas  {@link http://moodle.com}
+ * @license    http://www.gnu.org/copyleft/gpl.html GNU GPL v3 or later
+ */
 
-    global $db;
-    
-    $result = $db->Execute("$command");
+defined('MOODLE_INTERNAL') || die();
 
-    if ($result) {
-        if ($feedback) {
-            echo "<P><FONT COLOR=green><B>".get_string("success")."</B></FONT></P>";
-        }
-        return true;
-    } else {
-        if ($feedback) {
-            echo "<P><FONT COLOR=red><B>".get_string("error")."</B></FONT></P>";
-        }
+/**
+ * The maximum courses in a category
+ * MAX_COURSES_IN_CATEGORY * MAX_COURSE_CATEGORIES must not be more than max integer!
+ */
+define('MAX_COURSES_IN_CATEGORY', 10000);
+
+/**
+  * The maximum number of course categories
+  * MAX_COURSES_IN_CATEGORY * MAX_COURSE_CATEGORIES must not be more than max integer!
+  */
+define('MAX_COURSE_CATEGORIES', 10000);
+
+/**
+ * Number of seconds to wait before updating lastaccess information in DB.
+ *
+ * We allow overwrites from config.php, useful to ensure coherence in performance
+ * tests results.
+ */
+if (!defined('LASTACCESS_UPDATE_SECS')) {
+    define('LASTACCESS_UPDATE_SECS', 60);
+}
+
+/**
+ * Returns $user object of the main admin user
+ *
+ * @static stdClass $mainadmin
+ * @return stdClass {@link $USER} record from DB, false if not found
+ */
+function get_admin() {
+    global $CFG, $DB;
+
+    static $mainadmin = null;
+    static $prevadmins = null;
+
+    if (empty($CFG->siteadmins)) {
+        // Should not happen on an ordinary site.
+        // It does however happen during unit tests.
         return false;
     }
-}
-/**
-* Run an arbitrary sequence of semicolon-delimited SQL commands
-* 
-* Assumes that the input text (file or string consists of 
-* a number of SQL statements ENDING WITH SEMICOLONS.  The 
-* semicolons MUST be the last character in a line.
-* Lines that are blank or that start with "#" are ignored.
-* Only tested with mysql dump files (mysqldump -p -d moodle)
-*
-* @param    type description
-*/
 
-function modify_database($sqlfile="", $sqlstring="") {
-
-    global $CFG;
-
-    $success = true;  // Let's be optimistic :-)
-
-    if (!empty($sqlfile)) {
-        if (!is_readable($sqlfile)) {
-            $success = false;
-            echo "<P>Tried to modify database, but \"$sqlfile\" doesn't exist!</P>";
-            return $success;
-        } else {
-            $lines = file($sqlfile);
-        }
-    } else {
-        $lines[] = $sqlstring;
+    if (isset($mainadmin) and $prevadmins === $CFG->siteadmins) {
+        return clone($mainadmin);
     }
 
-    $command = "";
+    $mainadmin = null;
 
-    foreach ($lines as $line) {
-        $line = rtrim($line);
-        $length = strlen($line);
-
-        if ($length and $line[0] <> "#") { 
-            if (substr($line, $length-1, 1) == ";") {
-                $line = substr($line, 0, $length-1);   // strip ;
-                $command .= $line;
-                $command = str_replace("prefix_", $CFG->prefix, $command); // Table prefixes
-                if (! execute_sql($command)) {
-                    $success = false;
-                }
-                $command = "";
-            } else {
-                $command .= $line;
-            }
-        }
-    }
-
-    return $success;
-
-}
-
-/// FUNCTIONS TO MODIFY TABLES ////////////////////////////////////////////
-
-/**
-* Add a new field to a table, or modify an existing one (if oldfield is defined).
-* 
-* Add a new field to a table, or modify an existing one (if oldfield is defined).
-*
-* @param    type description
-*/
-
-function table_column($table, $oldfield, $field, $type="integer", $size="10",
-                      $signed="unsigned", $default="0", $null="not null", $after="") {
-    global $CFG, $db;
-
-    switch (strtolower($CFG->dbtype)) {
-
-        case "mysql":
-        case "mysqlt":
-
-            switch (strtolower($type)) {
-                case "text":
-                    $type = "TEXT";
-                    $signed = "";
-                    break;
-                case "integer":
-                    $type = "INTEGER($size)";
-                    break;
-                case "varchar":
-                    $type = "VARCHAR($size)";
-                    $signed = "";
-                    break;
-            }
-
-            if (!empty($oldfield)) {
-                $operation = "CHANGE $oldfield $field";
-            } else {
-                $operation = "ADD $field";
-            }
-
-            $default = "DEFAULT '$default'";
-
-            if (!empty($after)) {
-                $after = "AFTER `$after`";
-            }
-
-            return execute_sql("ALTER TABLE {$CFG->prefix}$table $operation $type $signed $default $null $after");
+    foreach (explode(',', $CFG->siteadmins) as $id) {
+        if ($user = $DB->get_record('user', array('id'=>$id, 'deleted'=>0))) {
+            $mainadmin = $user;
             break;
-
-        case "postgres7":        // From Petri Asikainen
-            //Check db-version
-            $dbinfo = $db->ServerInfo();
-            $dbver = substr($dbinfo['version'],0,3);
-            
-            //to prevent conflicts with reserved words
-            $field = "\"$field\"";
-            $oldfield = "\"$oldfield\"";
-
-            switch (strtolower($type)) {
-                case "integer":
-                    if ($size <= 2) {
-                        $type = "INT2";
-                    } 
-                    if ($size <= 4) {
-                        $type = "INT";
-                    }
-                    if  ($size > 4) {
-                        $type = "INT8";
-                    }
-                    break;
-                case "varchar":
-                    $type = "VARCHAR($size)";
-                    break;
-            }
-
-            $default = "'$default'";
-
-            //After is not implemented in postgesql
-            //if (!empty($after)) {
-            //    $after = "AFTER '$after'";
-            //}
-
-            if ($oldfield != "\"\"") {
-                if ($field != $oldfield) {
-                    execute_sql("ALTER TABLE {$CFG->prefix}$table RENAME COLUMN $oldfield TO $field");
-                }
-            } else {
-                execute_sql("ALTER TABLE {$CFG->prefix}$table ADD COLUMN $field $type");
-                execute_sql("UPDATE {$CFG->prefix}$table SET $field=$default");
-            }
-
-            if ($dbver >= "7.3") {
-                // modifying 'not null' is posible before 7.3
-                //update default values to table
-                if ($null == "NOT NULL") {
-                    execute_sql("UPDATE {$CFG->prefix}$table SET $field=$default where $field IS NULL");
-                    execute_sql("ALTER TABLE {$CFG->prefix}$table ALTER COLUMN $field SET $null");
-                } else {
-                    execute_sql("ALTER TABLE {$CFG->prefix}$table ALTER COLUMN $field DROP NOT NULL");
-                }
-            }
-
-            return execute_sql("ALTER TABLE {$CFG->prefix}$table ALTER COLUMN $field SET DEFAULT $default");
-
-            break;
-
-        default:
-            switch (strtolower($type)) {
-                case "integer":
-                    $type = "INTEGER";
-                    break;
-                case "varchar":
-                    $type = "VARCHAR";
-                    break;
-            }
-
-            $default = "DEFAULT '$default'";
-
-            if (!empty($after)) {
-                $after = "AFTER $after";
-            }
-
-            if (!empty($oldfield)) {
-                execute_sql("ALTER TABLE {$CFG->prefix}$table RENAME COLUMN $oldfield $field");
-            } else {
-                execute_sql("ALTER TABLE {$CFG->prefix}$table ADD COLUMN $field $type");
-            }
-
-            execute_sql("ALTER TABLE {$CFG->prefix}$table ALTER COLUMN $field SET $null");
-            return execute_sql("ALTER TABLE {$CFG->prefix}$table ALTER COLUMN $field SET $default");
-            break;
-
-    }
-}
-
-
-
-/// GENERIC FUNCTIONS TO CHECK AND COUNT RECORDS ////////////////////////////////////////
-
-/**
-* Returns true or false depending on whether the specified record exists
-* 
-* Returns true or false depending on whether the specified record exists
-*
-* @param    type description
-*/
-function record_exists($table, $field1="", $value1="", $field2="", $value2="", $field3="", $value3="") {
-
-    global $CFG;
-
-    if ($field1) {
-        $select = "WHERE $field1 = '$value1'";
-        if ($field2) {
-            $select .= " AND $field2 = '$value2'";
-            if ($field3) {
-                $select .= " AND $field3 = '$value3'";
-            }
         }
+    }
+
+    if ($mainadmin) {
+        $prevadmins = $CFG->siteadmins;
+        return clone($mainadmin);
     } else {
-        $select = "";
-    }
-
-    return record_exists_sql("SELECT * FROM $CFG->prefix$table $select LIMIT 1");
-}
-
-
-/**
-* Returns true or false depending on whether the specified record exists
-* 
-* The sql statement is provided as a string.
-*
-* @param    type description
-*/
-function record_exists_sql($sql) {
-
-    global $CFG, $db;
-
-    if (!$rs = $db->Execute($sql)) {
-        if (isset($CFG->debug) and $CFG->debug > 7) {
-            notify($db->ErrorMsg()."<br /><br />$sql");
-        }
-        return false;
-    }
-
-    if ( $rs->RecordCount() ) {
-        return true;
-    } else {
-        return false;
-    }
-}
-
-
-/**
-* Get all the records and count them
-* 
-* Get all the records and count them
-*
-* @param    type description
-*/
-function count_records($table, $field1="", $value1="", $field2="", $value2="", $field3="", $value3="") {
-
-    global $CFG;
-
-    if ($field1) {
-        $select = "WHERE $field1 = '$value1'";
-        if ($field2) {
-            $select .= " AND $field2 = '$value2'";
-            if ($field3) {
-                $select .= " AND $field3 = '$value3'";
-            }
-        }
-    } else {
-        $select = "";
-    }
-
-    return count_records_sql("SELECT COUNT(*) FROM $CFG->prefix$table $select");
-}
-
-/**
-* Get all the records and count them
-* 
-* Get all the records and count them
-*
-* @param    type description
-*
-*/
-function count_records_select($table, $select="") {
-
-    global $CFG;
-
-    if ($select) {
-        $select = "WHERE $select";
-    }
-
-    return count_records_sql("SELECT COUNT(*) FROM $CFG->prefix$table $select");
-}
-
-
-/**
-* Get all the records and count them
-* 
-* The sql statement is provided as a string.
-*
-* @param    type description
-*/
-function count_records_sql($sql) {
-
-    global $CFG, $db;
-
-    $rs = $db->Execute("$sql");
-    if (!$rs) {
-        if (isset($CFG->debug) and $CFG->debug > 7) {
-            notify($db->ErrorMsg()."<br /><br />$sql");
-        }
-        return 0;
-    }
-
-    return $rs->fields[0];
-}
-
-
-
-
-/// GENERIC FUNCTIONS TO GET, INSERT, OR UPDATE DATA  ///////////////////////////////////
-
-/**
-* Get a single record as an object
-* 
-* Get a single record as an object
-*
-* @param    string  $table the name of the table to select from
-* @param    string  $field1 the name of the field for the first criteria
-* @param    string  $value1 the value of the field for the first criteria
-* @param    string  $field2 the name of the field for the second criteria
-* @param    string  $value2 the value of the field for the second criteria
-* @param    string  $field3 the name of the field for the third criteria
-* @param    string  $value3 the value of the field for the third criteria
-* @return   object(fieldset)    a fieldset object containing the first record selected
-*/
-function get_record($table, $field1, $value1, $field2="", $value2="", $field3="", $value3="") {
-    
-    global $CFG;
-
-    $select = "WHERE $field1 = '$value1'";
-
-    if ($field2) {
-        $select .= " AND $field2 = '$value2'";
-        if ($field3) {
-            $select .= " AND $field3 = '$value3'";
-        }
-    }
-
-    return get_record_sql("SELECT * FROM $CFG->prefix$table $select");
-}
-
-/**
-* Get a single record as an object
-* 
-* The sql statement is provided as a string.
-* A LIMIT is normally added to only look for 1 record
-*
-* @param    type description
-*/
-function get_record_sql($sql) {
-
-    global $db, $CFG;
-
-    if (isset($CFG->debug) and $CFG->debug > 7) {    // Debugging mode - don't use limit
-       $limit = "";
-    } else {
-       $limit = " LIMIT 1";    // Workaround - limit to one record
-    }
-
-    if (!$rs = $db->Execute("$sql$limit")) {
-        if (isset($CFG->debug) and $CFG->debug > 7) {    // Debugging mode - print checks
-            notify( $db->ErrorMsg() . "<br /><br />$sql$limit" );
-        }
-        return false;
-    }
-
-    if (!$recordcount = $rs->RecordCount()) {
-        return false;                 // Found no records
-    }
-
-    if ($recordcount == 1) {          // Found one record
-        return (object)$rs->fields;
-
-    } else {                          // Error: found more than one record
-        notify("Error:  Turn off debugging to hide this error.");
-        notify("$sql$limit");
-        if ($records = $rs->GetAssoc(true)) {
-            notify("Found more than one record in get_record_sql !");
-            print_object($records);
-        } else {
-            notify("Very strange error in get_record_sql !");
-            print_object($rs);
-        }
-        print_continue("$CFG->wwwroot/admin/config.php");
-    }
-}
-
-/**
-* Gets one record from a table, as an object
-* 
-* "select" is a fragment of SQL to define the selection criteria
-*
-* @param    type description
-*/
-function get_record_select($table, $select="", $fields="*") {
-
-    global $CFG;
-
-    if ($select) {
-        $select = "WHERE $select";
-    }
-
-    return get_record_sql("SELECT $fields FROM $CFG->prefix$table $select");
-}
-
-
-/**
-* Get a number of records as an array of objects
-* 
-* Can optionally be sorted eg "time ASC" or "time DESC"
-* If "fields" is specified, only those fields are returned
-* The "key" is the first column returned, eg usually "id"
-* limitfrom and limitnum must both be specified or not at all
-*
-* @param    type description
-*/
-function get_records($table, $field="", $value="", $sort="", $fields="*", $limitfrom="", $limitnum="") {
-
-    global $CFG;
-
-    if ($field) {
-        $select = "WHERE $field = '$value'";
-    } else {
-        $select = "";
-    }
-
-    if ($limitfrom !== "") {
-        switch ($CFG->dbtype) {
-            case "mysql":
-                 $limit = "LIMIT $limitfrom,$limitnum";
-                 break;
-            case "postgres7":
-                 $limit = "LIMIT $limitnum OFFSET $limitfrom";
-                 break;
-            default: 
-                 $limit = "LIMIT $limitnum,$limitfrom";
-        }
-    } else {
-        $limit = "";
-    }
-
-    if ($sort) {
-        $sort = "ORDER BY $sort";
-    }
-
-    return get_records_sql("SELECT $fields FROM $CFG->prefix$table $select $sort $limit");
-}
-
-/**
-* Get a number of records as an array of objects
-* 
-* Can optionally be sorted eg "time ASC" or "time DESC"
-* "select" is a fragment of SQL to define the selection criteria
-* The "key" is the first column returned, eg usually "id"
-* limitfrom and limitnum must both be specified or not at all
-*
-* @param    type description
-*/
-function get_records_select($table, $select="", $sort="", $fields="*", $limitfrom="", $limitnum="") {
-
-    global $CFG;
-
-    if ($select) {
-        $select = "WHERE $select";
-    }
-
-    if ($limitfrom !== "") {
-        switch ($CFG->dbtype) {
-            case "mysql":
-                 $limit = "LIMIT $limitfrom,$limitnum";
-                 break;
-            case "postgres7":
-                 $limit = "LIMIT $limitnum OFFSET $limitfrom";
-                 break;
-            default: 
-                 $limit = "LIMIT $limitnum,$limitfrom";
-        }
-    } else {
-        $limit = "";
-    }
-
-    if ($sort) {
-        $sort = "ORDER BY $sort";
-    }
-
-    return get_records_sql("SELECT $fields FROM $CFG->prefix$table $select $sort $limit");
-}
-
-
-/**
-* Get a number of records as an array of objects
-* 
-* Differs from get_records() in that the values variable 
-* can be a comma-separated list of values eg  "4,5,6,10"
-* Can optionally be sorted eg "time ASC" or "time DESC"
-* The "key" is the first column returned, eg usually "id"
-*
-* @param    type description
-*/
-function get_records_list($table, $field="", $values="", $sort="", $fields="*") {
-
-    global $CFG;
-
-    if ($field) {
-        $select = "WHERE $field in ($values)";
-    } else {
-        $select = "";
-    }
-
-    if ($sort) {
-        $sort = "ORDER BY $sort";
-    }
-
-    return get_records_sql("SELECT $fields FROM $CFG->prefix$table $select $sort");
-}
-
-
-
-/**
-* Get a number of records as an array of objects
-* 
-* The "key" is the first column returned, eg usually "id"
-* The sql statement is provided as a string.
-*
-* @param    type description
-*/
-function get_records_sql($sql) {
-
-    global $CFG,$db;
-
-    if (!$rs = $db->Execute($sql)) {
-        if (isset($CFG->debug) and $CFG->debug > 7) {
-            notify($db->ErrorMsg()."<br /><br />$sql");
-        }
-        return false;
-    }
-
-    if ( $rs->RecordCount() > 0 ) {
-        if ($records = $rs->GetAssoc(true)) {
-            foreach ($records as $key => $record) {
-                $objects[$key] = (object) $record;
-            }
-            return $objects;
-        } else {
-            return false;
-        }
-    } else {
+        // this should not happen
         return false;
     }
 }
 
 /**
-* Get a number of records as an array of objects
-* 
-* Can optionally be sorted eg "time ASC" or "time DESC"
-* If "fields" is specified, only those fields are returned
-* The "key" is the first column returned, eg usually "id"
-* 
-* @param    type description
-*/
-function get_records_menu($table, $field="", $value="", $sort="", $fields="*") {
-
-    global $CFG;
-
-    if ($field) {
-        $select = "WHERE $field = '$value'";
-    } else {
-        $select = "";
-    }
-
-    if ($sort) {
-        $sort = "ORDER BY $sort";
-    }
-
-    return get_records_sql_menu("SELECT $fields FROM $CFG->prefix$table $select $sort");
-}
-
-/**
-* Get a number of records as an array of objects
-* 
-* Can optionally be sorted eg "time ASC" or "time DESC"
-* "select" is a fragment of SQL to define the selection criteria
-* Returns associative array of first two fields
-* 
-* @param    type description
-*/
-function get_records_select_menu($table, $select="", $sort="", $fields="*") {
-
-    global $CFG;
-
-    if ($select) {
-        $select = "WHERE $select";
-    }
-
-    if ($sort) {
-        $sort = "ORDER BY $sort";
-    }
-
-    return get_records_sql_menu("SELECT $fields FROM $CFG->prefix$table $select $sort");
-}
-
-
-/**
-* Given an SQL select, this function returns an associative 
-* 
-* array of the first two columns.  This is most useful in 
-* combination with the choose_from_menu function to create 
-* a form menu.
-*
-* @param    type description
-*/
-function get_records_sql_menu($sql) {
-
-    global $CFG, $db;
-
-    if (!$rs = $db->Execute($sql)) {
-        if (isset($CFG->debug) and $CFG->debug > 7) {
-            notify($db->ErrorMsg()."<br /><br />$sql");
-        }
-        return false;
-    }
-
-    if ( $rs->RecordCount() > 0 ) {
-        while (!$rs->EOF) {
-            $menu[$rs->fields[0]] = $rs->fields[1];
-            $rs->MoveNext();
-        }
-        return $menu;
-        
-    } else {
-        return false;
-    }
-}
-
-/**
-* Get a single field from a database record
-* 
-* longdesc
-*
-* @param    type description
-*/
-function get_field($table, $return, $field1, $value1, $field2="", $value2="", $field3="", $value3="") {
-
-    global $db, $CFG;
-
-    $select = "WHERE $field1 = '$value1'";
-
-    if ($field2) {
-        $select .= " AND $field2 = '$value2'";
-        if ($field3) {
-            $select .= " AND $field3 = '$value3'";
-        }
-    }
-
-    $rs = $db->Execute("SELECT $return FROM $CFG->prefix$table $select");
-    if (!$rs) {
-        if (isset($CFG->debug) and $CFG->debug > 7) {
-            notify($db->ErrorMsg()."<br /><br />SELECT $return FROM $CFG->prefix$table $select");
-        }
-        return false;
-    }
-
-    if ( $rs->RecordCount() == 1 ) {
-        return $rs->fields["$return"];
-    } else {
-        return false;
-    }
-}
-
-/**
-* Set a single field in a database record
-* 
-* longdesc
-*
-* @param    type description
-*/
-function set_field($table, $newfield, $newvalue, $field1, $value1, $field2="", $value2="", $field3="", $value3="") {
-
-    global $db, $CFG;
-
-    $select = "WHERE $field1 = '$value1'";
-
-    if ($field2) {
-        $select .= " AND $field2 = '$value2'";
-        if ($field3) {
-            $select .= " AND $field3 = '$value3'";
-        }
-    }
-
-    return $db->Execute("UPDATE $CFG->prefix$table SET $newfield = '$newvalue' $select");
-}
-
-
-/**
-* Delete one or more records from a table
-* 
-* Delete one or more records from a table
-*
-* @param    type description
-*/
-function delete_records($table, $field1="", $value1="", $field2="", $value2="", $field3="", $value3="") {
-
-    global $db, $CFG;
-
-    if ($field1) {
-        $select = "WHERE $field1 = '$value1'";
-        if ($field2) {
-            $select .= " AND $field2 = '$value2'";
-            if ($field3) {
-                $select .= " AND $field3 = '$value3'";
-            }
-        }
-    } else {
-        $select = "";
-    }
-
-    return $db->Execute("DELETE FROM $CFG->prefix$table $select");
-}
-
-/**
-* Delete one or more records from a table
-* 
-* "select" is a fragment of SQL to define the selection criteria
-*
-* @param    type description
-*/
-function delete_records_select($table, $select="") {
-
-    global $CFG, $db;
-
-    if ($select) {
-        $select = "WHERE $select";
-    }
-
-    return $db->Execute("DELETE FROM $CFG->prefix$table $select");
-}
-
-
-/**
-* Insert a record into a table and return the "id" field if required
-* 
-* If the return ID isn't required, then this just reports success as true/false.
-* $dataobject is an object containing needed data
-*
-* @param    type description
-*/
-function insert_record($table, $dataobject, $returnid=true, $primarykey='id') {
-                                                                                                                
-    global $db, $CFG;
-
-/// Execute a dummy query to get an empty recordset
-    if (!$rs = $db->Execute("SELECT * FROM $CFG->prefix$table WHERE $primarykey ='-1'")) {
-        return false;
-    }
-                                                                                                                
-/// Get the correct SQL from adoDB
-    if (!$insertSQL = $db->GetInsertSQL($rs, (array)$dataobject, true)) {
-        return false;
-    }
-                                                                                                                
-/// Run the SQL statement
-    if (!$rs = $db->Execute($insertSQL)) {
-        if (isset($CFG->debug) and $CFG->debug > 7) {
-            notify($db->ErrorMsg()."<br /><br />$insertSQL");
-        }
-        return false;
-    }
-                                                                                                                
-/// If a return ID is not needed then just return true now
-    if (!$returnid) { 
-        return true;
-    }
-
-/// Find the return ID of the newly inserted record
-    switch ($CFG->dbtype) {
-        case "postgres7":             // Just loves to be special
-            $oid = $db->Insert_ID();
-            if ($rs = $db->Execute("SELECT $primarykey FROM $CFG->prefix$table WHERE oid = $oid")) {
-                if ($rs->RecordCount() == 1) {
-                    return (integer) $rs->fields[0];
-                }
-            }
-            return false;
-
-        default: 
-            return $db->Insert_ID();  // Should work on most databases, but not all!
-    }
-}
-
-
-/**
-* Update a record in a table
-* 
-* $dataobject is an object containing needed data
-* Relies on $dataobject having a variable "id" to 
-* specify the record to update
-*
-* @param    type description
-*/
-function update_record($table, $dataobject) {
-
-    global $db, $CFG;
-
-    if (! isset($dataobject->id) ) {
-        return false;
-    }
-
-    // Determine all the fields in the table
-    if (!$columns = $db->MetaColumns("$CFG->prefix$table")) {
-        return false;
-    }
-    $data = (array)$dataobject;
-
-    // Pull out data matching these fields
-    foreach ($columns as $column) {
-        if ($column->name <> "id" and isset($data[$column->name]) ) {
-            $ddd[$column->name] = $data[$column->name];
-        }
-    }
-
-    // Construct SQL queries
-    $numddd = count($ddd);
-    $count = 0;
-    $update = "";
-
-    foreach ($ddd as $key => $value) {
-        $count++;
-        $update .= "$key = '$value'";
-        if ($count < $numddd) {
-            $update .= ", ";
-        }
-    }
-
-    if ($rs = $db->Execute("UPDATE $CFG->prefix$table SET $update WHERE id = '$dataobject->id'")) {
-        return true;
-    } else {
-        if (isset($CFG->debug) and $CFG->debug > 7) {
-            notify($db->ErrorMsg()."<br /><br />UPDATE $CFG->prefix$table SET $update WHERE id = '$dataobject->id'");
-        }
-        return false;
-    }
-}
-
-
-
-
-/// USER DATABASE ////////////////////////////////////////////////
-
-/**
-* Get a complete user record, which includes all the info 
-* 
-* in the user record, as well as membership information
-* Suitable for setting as $USER session cookie.
-*
-* @param    type description
-*/
-function get_user_info_from_db($field, $value) {
-
-    if (!$field or !$value) {
-        return false;
-    }
-
-    if (! $user = get_record_select("user", "$field = '$value' AND deleted <> '1'")) {
-        return false;
-    }
-
-    // Add membership information
-
-    if ($site = get_site()) { // Everyone is always a member of the top course
-        $user->student[$site->id] = true;
-    }
-
-    if ($students = get_records("user_students", "userid", $user->id)) {
-        foreach ($students as $student) {
-            if (get_field("course", "visible", "id", $student->course)) {
-                $user->student[$student->course] = true;
-            }
-            $user->timeaccess[$student->course] = $student->timeaccess;
-        }
-    }
-
-    if ($teachers = get_records("user_teachers", "userid", $user->id)) {
-        foreach ($teachers as $teacher) {
-            $user->teacher[$teacher->course] = true;
-            if ($teacher->editall) {
-                $user->teacheredit[$teacher->course] = true;
-            }
-            $user->timeaccess[$teacher->course] = $teacher->timeaccess;
-        }
-    }
-
-    if ($admins = get_records("user_admins", "userid", $user->id)) {
-        $user->admin = true;
-    }
-
-    if ($displays = get_records("course_display", "userid", $user->id)) {
-        foreach ($displays as $display) {
-            $user->display[$display->course] = $display->display;
-        }
-    }
-
-    if ($groups = get_records("groups_members", "userid", $user->id)) {
-        foreach ($groups as $groupmember) {
-            $courseid = get_field("groups", "courseid", "id", $groupmember->groupid);
-            $user->groupmember[$courseid] = $groupmember->groupid;
-        }
-    }
-
-    if ($preferences = get_records('user_preferences', 'userid', $user->id)) {
-        foreach ($preferences as $preference) {
-            $user->preference[$preference->name] = $preference->value;
-        }
-    }
-
-    return $user;
-}
-
-/**
-* Updates user record to record their last access
-* 
-* longdesc
-*
-*/
-function update_user_in_db() {
-
-   global $db, $USER, $REMOTE_ADDR, $CFG;
-
-   if (!isset($USER->id)) 
-       return false;
-
-   $timenow = time();
-   if ($db->Execute("UPDATE {$CFG->prefix}user SET lastIP='$REMOTE_ADDR', lastaccess='$timenow' 
-                     WHERE id = '$USER->id' ")) {
-       return true;
-   } else {
-       return false;
-   }
-}
-
-
-/**
-* Does this username and password specify a valid admin user?
-* 
-* longdesc
-*
-* @param    type description
-*/
-function adminlogin($username, $md5password) {
-
-    global $CFG;
-
-    return record_exists_sql("SELECT u.id 
-                                FROM {$CFG->prefix}user u, 
-                                     {$CFG->prefix}user_admins a 
-                              WHERE u.id = a.userid 
-                                AND u.username = '$username' 
-                                AND u.password = '$md5password'");
-}
-
-
-/**
-* Get the guest user information from the database
-* 
-* longdesc
-*
-* @param    type description
-*/
-function get_guest() {
-    return get_user_info_from_db("username", "guest");
-}
-
-
-/**
-* Returns $user object of the main admin user
-* 
-* longdesc
-*
-* @param    type description
-*/
-function get_admin () {
-
-    global $CFG;
-
-    if ( $admins = get_admins() ) {
-        foreach ($admins as $admin) {
-            return $admin;   // ie the first one 
-        }
-    } else {
-        return false;
-    }
-}
-
-/**
-* Returns list of all admins
-* 
-* longdesc
-*
-* @param    type description
-*/
+ * Returns list of all admins, using 1 DB query
+ *
+ * @return array
+ */
 function get_admins() {
+    global $DB, $CFG;
 
-    global $CFG;
-
-    return get_records_sql("SELECT u.*, a.id as adminid 
-                              FROM {$CFG->prefix}user u, 
-                                   {$CFG->prefix}user_admins a
-                             WHERE a.userid = u.id
-                             ORDER BY a.id ASC");
-}
-
-/**
-* Returns list of all creators
-* 
-* longdesc
-*
-* @param    type description
-*/
-function get_creators() {
-
-    global $CFG;
-
-    return get_records_sql("SELECT u.*
-                              FROM {$CFG->prefix}user u,
-                                   {$CFG->prefix}user_coursecreators a
-                             WHERE a.userid = u.id
-                             ORDER BY u.id ASC");
-}
-
-/**
-* Returns $user object of the main teacher for a course
-* 
-* longdesc
-*
-* @param    type description
-*/
-function get_teacher($courseid) {
-
-    global $CFG;
-
-    if ( $teachers = get_course_teachers($courseid, "t.authority ASC")) {
-        foreach ($teachers as $teacher) {
-            if ($teacher->authority) {
-                return $teacher;   // the highest authority teacher
-            }
-        }
-    } else {
-        return false;
-    }
-}
-
-/**
-* Searches logs to find all enrolments since a certain date
-* 
-* used to print recent activity
-*
-* @param    type description
-*/
-function get_recent_enrolments($courseid, $timestart) {
-
-    global $CFG;
-
-    return get_records_sql("SELECT DISTINCT u.id, u.firstname, u.lastname
-                            FROM {$CFG->prefix}user u,
-                                 {$CFG->prefix}user_students s,
-                                 {$CFG->prefix}log l
-                            WHERE l.time > '$timestart' 
-                              AND l.course = '$courseid'
-                              AND l.module = 'course' 
-                              AND l.action = 'enrol'
-                              AND l.info = u.id
-                              AND u.id = s.userid
-                              AND s.course = '$courseid'
-                              ORDER BY l.time ASC");
-}
-
-/**
-* Returns list of all students in this course
-* 
-* @param    type description
-*/
-function get_course_students($courseid, $sort="s.timeaccess", $dir="", $page=0, $recordsperpage=99999,
-                             $firstinitial="", $lastinitial="", $group=NULL, $search="") {
-
-    global $CFG;
-
-    switch ($CFG->dbtype) {
-        case "mysql":
-             $fullname = " CONCAT(firstname,\" \",lastname) ";
-             $limit = "LIMIT $page,$recordsperpage";
-             $LIKE = "LIKE";
-             break;
-        case "postgres7":
-             $fullname = " firstname||' '||lastname ";
-             $limit = "LIMIT $recordsperpage OFFSET ".($page);
-             $LIKE = "ILIKE";
-             break;
-        default: 
-             $fullname = " firstname||\" \"||lastname ";
-             $limit = "LIMIT $recordsperpage,$page";
-             $LIKE = "ILIKE";
-    }
-
-    $groupmembers = '';
-    $select = "s.course = '$courseid' AND s.userid = u.id AND u.deleted = '0' ";
-
-    if ($search) {
-        $search = " AND ($fullname $LIKE '%$search%' OR email $LIKE '%$search%') ";
-    }
-
-    if ($firstinitial) {
-        $select .= " AND u.firstname $LIKE '$firstinitial%' ";
-    }
-
-    if ($lastinitial) {
-        $select .= " AND u.lastname $LIKE '$lastinitial%' ";
-    }
-
-    if ($group === 0) {   /// Need something here to get all students not in a group
+    if (empty($CFG->siteadmins)) {  // Should not happen on an ordinary site
         return array();
-
-    } else if ($group !== NULL) {
-        $groupmembers = ", {$CFG->prefix}groups_members gm ";
-        $select .= " AND u.id = gm.userid AND gm.groupid = '$group'";
     }
 
-    if ($sort) {
-        $sort = " ORDER BY $sort ";
-    }
+    $sql = "SELECT u.*
+              FROM {user} u
+             WHERE u.deleted = 0 AND u.id IN ($CFG->siteadmins)";
 
-    return get_records_sql("SELECT u.id, u.confirmed, u.username, u.firstname, u.lastname, u.maildisplay, u.mailformat,
-                            u.email, u.city, u.country, u.picture, u.idnumber, u.department, u.institution,
-                            u.emailstop, u.lang, u.timezone, s.timeaccess as lastaccess
-                            FROM {$CFG->prefix}user u,
-                                 {$CFG->prefix}user_students s
-                                 $groupmembers
-                            WHERE $select $search $sort $dir $limit");
-}
-
-/**
-* Counts the students in a given course, or a subset of them
-* 
-* @param    type description
-*/
-function count_course_students($course, $search="", $firstinitial="", $lastinitial="", $group=NULL) {
-
-    global $CFG;
-
-    switch ($CFG->dbtype) {
-        case "mysql":
-             $fullname = " CONCAT(firstname,\" \",lastname) ";
-             $LIKE = "LIKE";
-             break;
-        default: 
-             $fullname = " firstname||\' \'||lastname ";
-             $LIKE = "ILIKE";
-    }
-    
-    $groupmembers = "";
-        
-    $select = "s.course = '$course->id' AND s.userid = u.id AND u.deleted = '0'";
-
-    if ($search) {
-        $search = " AND ($fullname $LIKE '%$search%' OR email $LIKE '%$search%') ";
-    } 
-    if ($firstinitial) {
-        $select .= " AND u.firstname $LIKE '$firstinitial%'";
-    } 
-    if ($lastinitial) {
-        $select .= " AND u.lastname $LIKE '$lastinitial%'";
-    } 
-
-    if ($group === 0) {   /// Need something here to get all students not in a group
-        return 0;
-
-    } else if ($group !== NULL) {
-        $groupmembers = ", {$CFG->prefix}groups_members gm ";
-        $select .= " AND u.id = gm.userid AND gm.groupid = '$group'";
-    }
-
-    return count_records_sql("SELECT COUNT(*) 
-                              FROM {$CFG->prefix}user u,
-                                   {$CFG->prefix}user_students s $groupmembers
-                              WHERE $select");
-}
-
-
-/**
-* Returns list of all teachers in this course
-* 
-* @param    type description
-*/
-function get_course_teachers($courseid, $sort="t.authority ASC") {
-
-    global $CFG;
-
-    return get_records_sql("SELECT u.id, u.username, u.firstname, u.lastname, u.maildisplay, u.mailformat,
-                                   u.email, u.city, u.country, u.lastlogin, u.picture, u.lang, u.timezone, 
-                                   u.emailstop, t.authority,t.role,t.editall,t.timeaccess as lastaccess
-                            FROM {$CFG->prefix}user u, 
-                                 {$CFG->prefix}user_teachers t
-                            WHERE t.course = '$courseid' AND t.userid = u.id AND u.deleted = '0'
-                            ORDER BY $sort");
-}
-
-/**
-* Returns all the users of a course: students and teachers
-* 
-* If the "course" is actually the site, then return all site users.
-*
-* @param    type description
-*/
-function get_course_users($courseid, $sort="timeaccess DESC") {
-
-    $site = get_site();
-
-    if ($courseid == $site->id) {
-        return get_site_users();
-    }
-
-    /// Using this method because the single SQL just would not always work!
-
-    $users = array();
-
-    $teachers = get_course_teachers($courseid, $sort);
-    $students = get_course_students($courseid, $sort);
-
-    if ($teachers and $students) {
-        foreach ($students as $student) {
-            $users[$student->id] = $student;
+    // We want the same order as in $CFG->siteadmins.
+    $records = $DB->get_records_sql($sql);
+    $admins = array();
+    foreach (explode(',', $CFG->siteadmins) as $id) {
+        $id = (int)$id;
+        if (!isset($records[$id])) {
+            // User does not exist, this should not happen.
+            continue;
         }
-        foreach ($teachers as $teacher) {
-            $users[$teacher->id] = $teacher;
-        }
-        return $users;
-
-    } else if ($teachers) {
-        return $teachers;
-
-    } else if ($students) {
-        return $students;
+        $admins[$records[$id]->id] = $records[$id];
     }
 
-    return $users;
-
-    /// This doesn't work ... why not?
-    ///    return get_records_sql("SELECT u.* FROM user u, user_students s, user_teachers t
-    ///                            WHERE (s.course = '$courseid' AND s.userid = u.id) OR 
-    ///                                  (t.course = '$courseid' AND t.userid = u.id)
-    ///                            ORDER BY $sort");
+    return $admins;
 }
 
-
 /**
-* Returns a list of all active users who are enrolled 
-* 
-* or teaching in courses on this server
-*
-* @param    type description
-*/
-function get_site_users($sort="u.lastaccess DESC", $select="") {
+ * Search through course users
+ *
+ * If $coursid specifies the site course then this function searches
+ * through all undeleted and confirmed users
+ *
+ * @global object
+ * @uses SITEID
+ * @uses SQL_PARAMS_NAMED
+ * @uses CONTEXT_COURSE
+ * @param int $courseid The course in question.
+ * @param int $groupid The group in question.
+ * @param string $searchtext The string to search for
+ * @param string $sort A field to sort by
+ * @param array $exceptions A list of IDs to ignore, eg 2,4,5,8,9,10
+ * @return array
+ */
+function search_users($courseid, $groupid, $searchtext, $sort='', array $exceptions=null) {
+    global $DB;
 
-    global $CFG;
+    $fullname  = $DB->sql_fullname('u.firstname', 'u.lastname');
 
-
-    if ($select) {
-        $selectinfo = $select;
+    if (!empty($exceptions)) {
+        list($exceptions, $params) = $DB->get_in_or_equal($exceptions, SQL_PARAMS_NAMED, 'ex', false);
+        $except = "AND u.id $exceptions";
     } else {
-        $selectinfo = "u.id, u.username, u.firstname, u.lastname, u.maildisplay, u.mailformat,".
-                      "u.email, u.emailstop, u.city, u.country, u.lastaccess, u.lastlogin, u.picture, u.lang, u.timezone";
+        $except = "";
+        $params = array();
     }
 
-    if (!$users = get_records_sql("SELECT DISTINCT $selectinfo from {$CFG->prefix}user u, {$CFG->prefix}user_students s
-                                    WHERE s.userid = u.id ORDER BY $sort")) {
-        $users = array();
+    if (!empty($sort)) {
+        $order = "ORDER BY $sort";
+    } else {
+        $order = "";
     }
 
-    if ($teachers = get_records_sql("SELECT DISTINCT $selectinfo from {$CFG->prefix}user u, {$CFG->prefix}user_teachers t
-                                      WHERE t.userid = u.id ORDER BY $sort")) {
-        foreach ($teachers as $teacher) {
-            $users[$teacher->id] = $teacher;
+    $select = "u.deleted = 0 AND u.confirmed = 1 AND (".$DB->sql_like($fullname, ':search1', false)." OR ".$DB->sql_like('u.email', ':search2', false).")";
+    $params['search1'] = "%$searchtext%";
+    $params['search2'] = "%$searchtext%";
+
+    if (!$courseid or $courseid == SITEID) {
+        $sql = "SELECT u.id, u.firstname, u.lastname, u.email
+                  FROM {user} u
+                 WHERE $select
+                       $except
+                $order";
+        return $DB->get_records_sql($sql, $params);
+
+    } else {
+        if ($groupid) {
+            $sql = "SELECT u.id, u.firstname, u.lastname, u.email
+                      FROM {user} u
+                      JOIN {groups_members} gm ON gm.userid = u.id
+                     WHERE $select AND gm.groupid = :groupid
+                           $except
+                     $order";
+            $params['groupid'] = $groupid;
+            return $DB->get_records_sql($sql, $params);
+
+        } else {
+            $context = context_course::instance($courseid);
+
+            // We want to query both the current context and parent contexts.
+            list($relatedctxsql, $relatedctxparams) = $DB->get_in_or_equal($context->get_parent_context_ids(true), SQL_PARAMS_NAMED, 'relatedctx');
+
+            $sql = "SELECT u.id, u.firstname, u.lastname, u.email
+                      FROM {user} u
+                      JOIN {role_assignments} ra ON ra.userid = u.id
+                     WHERE $select AND ra.contextid $relatedctxsql
+                           $except
+                    $order";
+            $params = array_merge($params, $relatedctxparams);
+            return $DB->get_records_sql($sql, $params);
         }
     }
+}
 
-    if ($admins = get_records_sql("SELECT DISTINCT $selectinfo from {$CFG->prefix}user u, {$CFG->prefix}user_admins a
-                                      WHERE a.userid = u.id ORDER BY $sort")) {
-        foreach ($admins as $admin) {
-            $users[$admin->id] = $admin;
-        }
+/**
+ * Returns SQL used to search through user table to find users (in a query
+ * which may also join and apply other conditions).
+ *
+ * You can combine this SQL with an existing query by adding 'AND $sql' to the
+ * WHERE clause of your query (where $sql is the first element in the array
+ * returned by this function), and merging in the $params array to the parameters
+ * of your query (where $params is the second element). Your query should use
+ * named parameters such as :param, rather than the question mark style.
+ *
+ * There are examples of basic usage in the unit test for this function.
+ *
+ * @param string $search the text to search for (empty string = find all)
+ * @param string $u the table alias for the user table in the query being
+ *     built. May be ''.
+ * @param bool $searchanywhere If true (default), searches in the middle of
+ *     names, otherwise only searches at start
+ * @param array $extrafields Array of extra user fields to include in search
+ * @param array $exclude Array of user ids to exclude (empty = don't exclude)
+ * @param array $includeonly If specified, only returns users that have ids
+ *     incldued in this array (empty = don't restrict)
+ * @return array an array with two elements, a fragment of SQL to go in the
+ *     where clause the query, and an associative array containing any required
+ *     parameters (using named placeholders).
+ */
+function users_search_sql($search, $u = 'u', $searchanywhere = true, array $extrafields = array(),
+        array $exclude = null, array $includeonly = null) {
+    global $DB, $CFG;
+    $params = array();
+    $tests = array();
+
+    if ($u) {
+        $u .= '.';
     }
 
-    return $users;
+    // If we have a $search string, put a field LIKE '$search%' condition on each field.
+    if ($search) {
+        $conditions = array(
+            $DB->sql_fullname($u . 'firstname', $u . 'lastname'),
+            $conditions[] = $u . 'lastname'
+        );
+        foreach ($extrafields as $field) {
+            $conditions[] = $u . $field;
+        }
+        if ($searchanywhere) {
+            $searchparam = '%' . $search . '%';
+        } else {
+            $searchparam = $search . '%';
+        }
+        $i = 0;
+        foreach ($conditions as $key => $condition) {
+            $conditions[$key] = $DB->sql_like($condition, ":con{$i}00", false, false);
+            $params["con{$i}00"] = $searchparam;
+            $i++;
+        }
+        $tests[] = '(' . implode(' OR ', $conditions) . ')';
+    }
+
+    // Add some additional sensible conditions.
+    $tests[] = $u . "id <> :guestid";
+    $params['guestid'] = $CFG->siteguest;
+    $tests[] = $u . 'deleted = 0';
+    $tests[] = $u . 'confirmed = 1';
+
+    // If we are being asked to exclude any users, do that.
+    if (!empty($exclude)) {
+        list($usertest, $userparams) = $DB->get_in_or_equal($exclude, SQL_PARAMS_NAMED, 'ex', false);
+        $tests[] = $u . 'id ' . $usertest;
+        $params = array_merge($params, $userparams);
+    }
+
+    // If we are validating a set list of userids, add an id IN (...) test.
+    if (!empty($includeonly)) {
+        list($usertest, $userparams) = $DB->get_in_or_equal($includeonly, SQL_PARAMS_NAMED, 'val');
+        $tests[] = $u . 'id ' . $usertest;
+        $params = array_merge($params, $userparams);
+    }
+
+    // In case there are no tests, add one result (this makes it easier to combine
+    // this with an existing query as you can always add AND $sql).
+    if (empty($tests)) {
+        $tests[] = '1 = 1';
+    }
+
+    // Combing the conditions and return.
+    return array(implode(' AND ', $tests), $params);
 }
 
 
 /**
-* Returns a subset of users 
-* 
-* longdesc
-*
-* @param    bookean $get    if false then only a count of the records is returned
-* @param    string  $search a simple string to search for
-* @param    boolean $confirmed  a switch to allow/disallow unconfirmed users
-* @param    array(int)  $exceptions a list of IDs to ignore, eg 2,4,5,8,9,10
-* @param    string  $sort   a SQL snippet for the sorting criteria to use
-*/
-function get_users($get=true, $search="", $confirmed=false, $exceptions="", $sort="firstname ASC",
-                   $firstinitial="", $lastinitial="") {
+ * This function generates the standard ORDER BY clause for use when generating
+ * lists of users. If you don't have a reason to use a different order, then
+ * you should use this method to generate the order when displaying lists of users.
+ *
+ * If the optional $search parameter is passed, then exact matches to the search
+ * will be sorted first. For example, suppose you have two users 'Al Zebra' and
+ * 'Alan Aardvark'. The default sort is Alan, then Al. If, however, you search for
+ * 'Al', then Al will be listed first. (With two users, this is not a big deal,
+ * but with thousands of users, it is essential.)
+ *
+ * The list of fields scanned for exact matches are:
+ *  - firstname
+ *  - lastname
+ *  - $DB->sql_fullname
+ *  - those returned by get_extra_user_fields
+ *
+ * If named parameters are used (which is the default, and highly recommended),
+ * then the parameter names are like :usersortexactN, where N is an int.
+ *
+ * The simplest possible example use is:
+ * list($sort, $params) = users_order_by_sql();
+ * $sql = 'SELECT * FROM {users} ORDER BY ' . $sort;
+ *
+ * A more complex example, showing that this sort can be combined with other sorts:
+ * list($sort, $sortparams) = users_order_by_sql('u');
+ * $sql = "SELECT g.id AS groupid, gg.groupingid, u.id AS userid, u.firstname, u.lastname, u.idnumber, u.username
+ *           FROM {groups} g
+ *      LEFT JOIN {groupings_groups} gg ON g.id = gg.groupid
+ *      LEFT JOIN {groups_members} gm ON g.id = gm.groupid
+ *      LEFT JOIN {user} u ON gm.userid = u.id
+ *          WHERE g.courseid = :courseid $groupwhere $groupingwhere
+ *       ORDER BY g.name, $sort";
+ * $params += $sortparams;
+ *
+ * An example showing the use of $search:
+ * list($sort, $sortparams) = users_order_by_sql('u', $search, $this->get_context());
+ * $order = ' ORDER BY ' . $sort;
+ * $params += $sortparams;
+ * $availableusers = $DB->get_records_sql($fields . $sql . $order, $params, $page*$perpage, $perpage);
+ *
+ * @param string $usertablealias (optional) any table prefix for the {users} table. E.g. 'u'.
+ * @param string $search (optional) a current search string. If given,
+ *      any exact matches to this string will be sorted first.
+ * @param context $context the context we are in. Use by get_extra_user_fields.
+ *      Defaults to $PAGE->context.
+ * @return array with two elements:
+ *      string SQL fragment to use in the ORDER BY clause. For example, "firstname, lastname".
+ *      array of parameters used in the SQL fragment.
+ */
+function users_order_by_sql($usertablealias = '', $search = null, context $context = null) {
+    global $DB, $PAGE;
 
-    global $CFG;
-
-    switch ($CFG->dbtype) {
-        case "mysql":
-             $fullname = " CONCAT(firstname,\" \",lastname) ";
-             $LIKE = "LIKE";
-             break;
-        case "postgres7":
-             $fullname = " firstname||' '||lastname ";
-             $LIKE = "ILIKE";
-             break;
-        default: 
-             $fullname = " firstname||\" \"||lastname ";
-             $LIKE = "ILIKE";
+    if ($usertablealias) {
+        $tableprefix = $usertablealias . '.';
+    } else {
+        $tableprefix = '';
     }
 
-    $select = "username <> 'guest' AND deleted = 0";
+    $sort = "{$tableprefix}lastname, {$tableprefix}firstname, {$tableprefix}id";
+    $params = array();
 
-    if ($search) {
-        $select .= " AND ($fullname $LIKE '%$search%' OR email $LIKE '%$search%') ";
+    if (!$search) {
+        return array($sort, $params);
+    }
+
+    if (!$context) {
+        $context = $PAGE->context;
+    }
+
+    $exactconditions = array();
+    $paramkey = 'usersortexact1';
+
+    $exactconditions[] = $DB->sql_fullname($tableprefix . 'firstname', $tableprefix  . 'lastname') .
+            ' = :' . $paramkey;
+    $params[$paramkey] = $search;
+    $paramkey++;
+
+    $fieldstocheck = array_merge(array('firstname', 'lastname'), get_extra_user_fields($context));
+    foreach ($fieldstocheck as $key => $field) {
+        $exactconditions[] = 'LOWER(' . $tableprefix . $field . ') = LOWER(:' . $paramkey . ')';
+        $params[$paramkey] = $search;
+        $paramkey++;
+    }
+
+    $sort = 'CASE WHEN ' . implode(' OR ', $exactconditions) .
+            ' THEN 0 ELSE 1 END, ' . $sort;
+
+    return array($sort, $params);
+}
+
+/**
+ * Returns a subset of users
+ *
+ * @global object
+ * @uses DEBUG_DEVELOPER
+ * @uses SQL_PARAMS_NAMED
+ * @param bool $get If false then only a count of the records is returned
+ * @param string $search A simple string to search for
+ * @param bool $confirmed A switch to allow/disallow unconfirmed users
+ * @param array $exceptions A list of IDs to ignore, eg 2,4,5,8,9,10
+ * @param string $sort A SQL snippet for the sorting criteria to use
+ * @param string $firstinitial Users whose first name starts with $firstinitial
+ * @param string $lastinitial Users whose last name starts with $lastinitial
+ * @param string $page The page or records to return
+ * @param string $recordsperpage The number of records to return per page
+ * @param string $fields A comma separated list of fields to be returned from the chosen table.
+ * @return array|int|bool  {@link $USER} records unless get is false in which case the integer count of the records found is returned.
+ *                        False is returned if an error is encountered.
+ */
+function get_users($get=true, $search='', $confirmed=false, array $exceptions=null, $sort='firstname ASC',
+                   $firstinitial='', $lastinitial='', $page='', $recordsperpage='', $fields='*', $extraselect='', array $extraparams=null) {
+    global $DB, $CFG;
+
+    if ($get && !$recordsperpage) {
+        debugging('Call to get_users with $get = true no $recordsperpage limit. ' .
+                'On large installations, this will probably cause an out of memory error. ' .
+                'Please think again and change your code so that it does not try to ' .
+                'load so much data into memory.', DEBUG_DEVELOPER);
+    }
+
+    $fullname  = $DB->sql_fullname();
+
+    $select = " id <> :guestid AND deleted = 0";
+    $params = array('guestid'=>$CFG->siteguest);
+
+    if (!empty($search)){
+        $search = trim($search);
+        $select .= " AND (".$DB->sql_like($fullname, ':search1', false)." OR ".$DB->sql_like('email', ':search2', false)." OR username = :search3)";
+        $params['search1'] = "%$search%";
+        $params['search2'] = "%$search%";
+        $params['search3'] = "$search";
     }
 
     if ($confirmed) {
-        $select .= " AND confirmed = '1' ";
+        $select .= " AND confirmed = 1";
     }
 
     if ($exceptions) {
-        $select .= " AND id NOT IN ($exceptions) ";
+        list($exceptions, $eparams) = $DB->get_in_or_equal($exceptions, SQL_PARAMS_NAMED, 'ex', false);
+        $params = $params + $eparams;
+        $select .= " AND id $exceptions";
     }
 
     if ($firstinitial) {
-        $select .= " AND firstname $LIKE '$firstinitial%'";
-    } 
+        $select .= " AND ".$DB->sql_like('firstname', ':fni', false, false);
+        $params['fni'] = "$firstinitial%";
+    }
     if ($lastinitial) {
-        $select .= " AND lastname $LIKE '$lastinitial%'";
-    } 
+        $select .= " AND ".$DB->sql_like('lastname', ':lni', false, false);
+        $params['lni'] = "$lastinitial%";
+    }
 
-    if ($sort and $get) {
-        $sort = " ORDER BY $sort ";
-    } else {
-        $sort = "";
+    if ($extraselect) {
+        $select .= " AND $extraselect";
+        $params = $params + (array)$extraparams;
     }
 
     if ($get) {
-        return get_records_select("user", "$select $sort");
+        return $DB->get_records_select('user', $select, $params, $sort, $fields, $page, $recordsperpage);
     } else {
-        return count_records_select("user", "$select $sort");
+        return $DB->count_records_select('user', $select, $params);
     }
 }
 
 
 /**
-* shortdesc
-* 
-* longdesc
-*
-* @param    type description
-*/
-function get_users_listing($sort="lastaccess", $dir="ASC", $page=0, $recordsperpage=99999,
-                           $search="", $firstinitial="", $lastinitial="") {
+ * Return filtered (if provided) list of users in site, except guest and deleted users.
+ *
+ * @param string $sort An SQL field to sort by
+ * @param string $dir The sort direction ASC|DESC
+ * @param int $page The page or records to return
+ * @param int $recordsperpage The number of records to return per page
+ * @param string $search A simple string to search for
+ * @param string $firstinitial Users whose first name starts with $firstinitial
+ * @param string $lastinitial Users whose last name starts with $lastinitial
+ * @param string $extraselect An additional SQL select statement to append to the query
+ * @param array $extraparams Additional parameters to use for the above $extraselect
+ * @param stdClass $extracontext If specified, will include user 'extra fields'
+ *   as appropriate for current user and given context
+ * @return array Array of {@link $USER} records
+ */
+function get_users_listing($sort='lastaccess', $dir='ASC', $page=0, $recordsperpage=0,
+                           $search='', $firstinitial='', $lastinitial='', $extraselect='',
+                           array $extraparams=null, $extracontext = null) {
+    global $DB, $CFG;
 
-    global $CFG;
+    $fullname  = $DB->sql_fullname();
 
-    switch ($CFG->dbtype) {
-        case "mysql":
-             $limit = "LIMIT $page,$recordsperpage";
-             $fullname = " CONCAT(firstname,\" \",lastname) ";
-             $LIKE = "LIKE";
-             break;
-        case "postgres7":
-             $limit = "LIMIT $recordsperpage OFFSET ".($page);
-             $fullname = " firstname||' '||lastname ";
-             $LIKE = "ILIKE";
-             break;
-        default: 
-             $limit = "LIMIT $recordsperpage,$page";
-             $fullname = " firstname||' '||lastname ";
-             $LIKE = "LIKE";
-    }
+    $select = "deleted <> 1 AND id <> :guestid";
+    $params = array('guestid' => $CFG->siteguest);
 
-    $select = 'deleted <> 1';
-
-    if ($search) {
-        $select .= " AND ($fullname $LIKE '%$search%' OR email $LIKE '%$search%') ";
+    if (!empty($search)) {
+        $search = trim($search);
+        $select .= " AND (". $DB->sql_like($fullname, ':search1', false, false).
+                   " OR ". $DB->sql_like('email', ':search2', false, false).
+                   " OR username = :search3)";
+        $params['search1'] = "%$search%";
+        $params['search2'] = "%$search%";
+        $params['search3'] = "$search";
     }
 
     if ($firstinitial) {
-        $select .= " AND firstname $LIKE '$firstinitial%' ";
+        $select .= " AND ". $DB->sql_like('firstname', ':fni', false, false);
+        $params['fni'] = "$firstinitial%";
+    }
+    if ($lastinitial) {
+        $select .= " AND ". $DB->sql_like('lastname', ':lni', false, false);
+        $params['lni'] = "$lastinitial%";
     }
 
-    if ($lastinitial) {
-        $select .= " AND lastname $LIKE '$lastinitial%' ";
+    if ($extraselect) {
+        $select .= " AND $extraselect";
+        $params = $params + (array)$extraparams;
     }
 
     if ($sort) {
         $sort = " ORDER BY $sort $dir";
     }
 
-/// warning: will return UNCONFIRMED USERS
-    return get_records_sql("SELECT id, username, email, firstname, lastname, city, country, lastaccess, confirmed
-                              FROM {$CFG->prefix}user 
-                             WHERE $select $sort $limit ");
-
-}
-
-
-/**
-* shortdesc
-* 
-* longdesc
-*
-* @param    type description
-*/
-function get_users_confirmed() {
-    global $CFG;
-    return get_records_sql("SELECT * 
-                              FROM {$CFG->prefix}user 
-                             WHERE confirmed = 1 
-                               AND deleted = 0
-                               AND username <> 'guest' 
-                               AND username <> 'changeme'");
-}
-
-
-/**
-* shortdesc
-* 
-* longdesc
-*
-* @param    type description
-*/
-function get_users_unconfirmed($cutofftime=2000000000) {
-    global $CFG;
-    return get_records_sql("SELECT * 
-                             FROM {$CFG->prefix}user 
-                            WHERE confirmed = 0
-                              AND firstaccess > 0 
-                              AND firstaccess < '$cutofftime'");
-}
-
-
-/**
-* shortdesc
-* 
-* longdesc
-*
-* @param    type description
-*/
-function get_users_longtimenosee($cutofftime) {
-    global $CFG;
-    return get_records_sql("SELECT DISTINCT *
-                              FROM {$CFG->prefix}user_students
-                             WHERE timeaccess > '0' 
-                               AND timeaccess < '$cutofftime' ");
-}
-
-/**
-* Returns an array of group objects that the user is a member of
-* in the given course.  If userid isn't specified, then return a 
-* list of all groups in the course.
-* 
-* @param    type description
-*/
-function get_groups($courseid, $userid=0) {
-    global $CFG;
-
-    if ($userid) {
-        $dbselect = ", {$CFG->prefix}groups_members m";
-        $userselect = "AND m.groupid = g.id AND m.userid = '$userid'";
-    } else {
-        $dbselect = '';
-        $userselect = '';
+    // If a context is specified, get extra user fields that the current user
+    // is supposed to see.
+    $extrafields = '';
+    if ($extracontext) {
+        $extrafields = get_extra_user_fields_sql($extracontext, '', '',
+                array('id', 'username', 'email', 'firstname', 'lastname', 'city', 'country',
+                'lastaccess', 'confirmed', 'mnethostid'));
     }
+    $namefields = get_all_user_name_fields(true);
+    $extrafields = "$extrafields, $namefields";
 
-    return get_records_sql("SELECT DISTINCT g.*
-                              FROM {$CFG->prefix}groups g $dbselect
-                             WHERE g.courseid = '$courseid' $userselect ");
+    // warning: will return UNCONFIRMED USERS
+    return $DB->get_records_sql("SELECT id, username, email, city, country, lastaccess, confirmed, mnethostid, suspended $extrafields
+                                   FROM {user}
+                                  WHERE $select
+                                  $sort", $params, $page, $recordsperpage);
+
 }
 
 
 /**
-* Returns an array of user objects
-* 
-* @param    type description
-*/
-function get_group_users($groupid, $sort="u.lastaccess DESC") {
-    global $CFG;
-    return get_records_sql("SELECT DISTINCT u.*
-                              FROM {$CFG->prefix}user u,
-                                   {$CFG->prefix}groups_members m 
-                             WHERE m.groupid = '$groupid'
-                               AND m.userid = u.id 
-                          ORDER BY $sort");
+ * Full list of users that have confirmed their accounts.
+ *
+ * @global object
+ * @return array of unconfirmed users
+ */
+function get_users_confirmed() {
+    global $DB, $CFG;
+    return $DB->get_records_sql("SELECT *
+                                   FROM {user}
+                                  WHERE confirmed = 1 AND deleted = 0 AND id <> ?", array($CFG->siteguest));
 }
-
-/**
-* An efficient way of finding all the users who aren't in groups yet
-* 
-* @param    type description
-*/
-function get_users_not_in_group($courseid) {
-    global $CFG;
-
-    return array();     /// XXX TO BE DONE
-}
-
-
-/**
-* Returns an array of user objects
-* 
-* @param    type description
-*/
-function get_group_students($groupid, $sort="u.lastaccess DESC") {
-    global $CFG;
-    return get_records_sql("SELECT DISTINCT u.*
-                              FROM {$CFG->prefix}user u,
-                                   {$CFG->prefix}groups_members m,
-                                   {$CFG->prefix}groups g,
-                                   {$CFG->prefix}user_students s
-                             WHERE m.groupid = '$groupid'
-                               AND m.userid = u.id 
-                               AND m.groupid = g.id 
-                               AND g.courseid = s.course
-                               AND s.userid = u.id
-                          ORDER BY $sort");
-}
-
-
-/**
-* Returns the user's group in a particular course
-* 
-* @param    type description
-*/
-function user_group($courseid, $userid) {
-    global $CFG;
-
-    return get_record_sql("SELECT g.*
-                             FROM {$CFG->prefix}groups g,
-                                  {$CFG->prefix}groups_members m
-                             WHERE g.courseid = '$courseid'
-                               AND g.id = m.groupid
-                               AND m.userid = '$userid'");
-}
-
-
 
 
 /// OTHER SITE AND COURSE FUNCTIONS /////////////////////////////////////////////
 
 
 /**
-* Returns $course object of the top-level site.
-* 
-* Returns $course object of the top-level site.
-*
-* @param    type description
-*/
-function get_site () {
+ * Returns $course object of the top-level site.
+ *
+ * @return object A {@link $COURSE} object for the site, exception if not found
+ */
+function get_site() {
+    global $SITE, $DB;
 
-    if ( $course = get_record("course", "category", 0)) {
+    if (!empty($SITE->id)) {   // We already have a global to use, so return that
+        return $SITE;
+    }
+
+    if ($course = $DB->get_record('course', array('category'=>0))) {
         return $course;
     } else {
-        return false;
+        // course table exists, but the site is not there,
+        // unfortunately there is no automatic way to recover
+        throw new moodle_exception('nosite', 'error');
     }
 }
 
+/**
+ * Gets a course object from database. If the course id corresponds to an
+ * already-loaded $COURSE or $SITE object, then the loaded object will be used,
+ * saving a database query.
+ *
+ * If it reuses an existing object, by default the object will be cloned. This
+ * means you can modify the object safely without affecting other code.
+ *
+ * @param int $courseid Course id
+ * @param bool $clone If true (default), makes a clone of the record
+ * @return stdClass A course object
+ * @throws dml_exception If not found in database
+ */
+function get_course($courseid, $clone = true) {
+    global $DB, $COURSE, $SITE;
+    if (!empty($COURSE->id) && $COURSE->id == $courseid) {
+        return $clone ? clone($COURSE) : $COURSE;
+    } else if (!empty($SITE->id) && $SITE->id == $courseid) {
+        return $clone ? clone($SITE) : $SITE;
+    } else {
+        return $DB->get_record('course', array('id' => $courseid), '*', MUST_EXIST);
+    }
+}
 
 /**
-* Returns list of courses, for whole site, or category
-* 
-* Returns list of courses, for whole site, or category
-*
-* @param    type description
-*/
+ * Returns list of courses, for whole site, or category
+ *
+ * Returns list of courses, for whole site, or category
+ * Important: Using c.* for fields is extremely expensive because
+ *            we are using distinct. You almost _NEVER_ need all the fields
+ *            in such a large SELECT
+ *
+ * @global object
+ * @global object
+ * @global object
+ * @uses CONTEXT_COURSE
+ * @param string|int $categoryid Either a category id or 'all' for everything
+ * @param string $sort A field and direction to sort by
+ * @param string $fields The additional fields to return
+ * @return array Array of courses
+ */
 function get_courses($categoryid="all", $sort="c.sortorder ASC", $fields="c.*") {
 
-    global $USER, $CFG;
+    global $USER, $CFG, $DB;
 
-    $categoryselect = "";
-    if ($categoryid != "all") {
-        $categoryselect = "c.category = '$categoryid'";
-    }
+    $params = array();
 
-    $teachertable = "";
-    $visiblecourses = "";
-    $sqland = "";
-    if (!empty($categoryselect)) {
-        $sqland = "AND ";
-    }
-    if (!empty($USER)) {  // May need to check they are a teacher
-        if (!iscreator()) {
-            $visiblecourses = "$sqland ((c.visible > 0) OR (t.userid = '$USER->id' AND t.course = c.id))";
-            $teachertable = ", {$CFG->prefix}user_teachers t";
-        }
+    if ($categoryid !== "all" && is_numeric($categoryid)) {
+        $categoryselect = "WHERE c.category = :catid";
+        $params['catid'] = $categoryid;
     } else {
-        $visiblecourses = "$sqland c.visible > 0";
+        $categoryselect = "";
     }
 
-    if ($categoryselect or $visiblecourses) {
-        $selectsql = "{$CFG->prefix}course c $teachertable WHERE $categoryselect $visiblecourses";
+    if (empty($sort)) {
+        $sortstatement = "";
     } else {
-        $selectsql = "{$CFG->prefix}course c $teachertable";
+        $sortstatement = "ORDER BY $sort";
     }
 
+    $visiblecourses = array();
 
-    return get_records_sql("SELECT DISTINCT $fields FROM $selectsql ORDER BY $sort");
-}
+    $ccselect = ', ' . context_helper::get_preload_record_columns_sql('ctx');
+    $ccjoin = "LEFT JOIN {context} ctx ON (ctx.instanceid = c.id AND ctx.contextlevel = :contextlevel)";
+    $params['contextlevel'] = CONTEXT_COURSE;
 
+    $sql = "SELECT $fields $ccselect
+              FROM {course} c
+           $ccjoin
+              $categoryselect
+              $sortstatement";
 
-/**
-* Returns list of courses, for whole site, or category
-* 
-* Similar to get_courses, but allows paging
-*
-* @param    type description
-*/
-function get_courses_page($categoryid="all", $sort="c.sortorder ASC", $fields="c.*", 
-                          &$totalcount, $limitfrom="", $limitnum="") {
+    // pull out all course matching the cat
+    if ($courses = $DB->get_records_sql($sql, $params)) {
 
-    global $USER, $CFG;
-
-    $categoryselect = "";
-    if ($categoryid != "all") {
-        $categoryselect = "c.category = '$categoryid'";
-    }
-
-    $teachertable = "";
-    $visiblecourses = "";
-    $sqland = "";
-    if (!empty($categoryselect)) {
-        $sqland = "AND ";
-    }
-    if (!empty($USER)) {  // May need to check they are a teacher
-        if (!iscreator()) {
-            $visiblecourses = "$sqland ((c.visible > 0) OR (t.userid = '$USER->id' AND t.course = c.id))";
-            $teachertable = ", {$CFG->prefix}user_teachers t";
-        }
-    } else {
-        $visiblecourses = "$sqland c.visible > 0";
-    }
-
-    if ($limitfrom !== "") {
-        switch ($CFG->dbtype) {
-            case "mysql":
-                 $limit = "LIMIT $limitfrom,$limitnum";
-                 break;
-            case "postgres7":
-                 $limit = "LIMIT $limitnum OFFSET $limitfrom";
-                 break;
-            default: 
-                 $limit = "LIMIT $limitnum,$limitfrom";
-        }
-    } else {
-        $limit = "";
-    }
-
-    $selectsql = "{$CFG->prefix}course c $teachertable WHERE $categoryselect $visiblecourses";
-
-    $totalcount = count_records_sql("SELECT COUNT(DISTINCT c.id) FROM $selectsql");
-
-    return get_records_sql("SELECT DISTINCT $fields FROM $selectsql ORDER BY $sort $limit");
-}
-
-
-/**
-* shortdesc
-* 
-* longdesc
-*
-* @param    type description
-*/
-function get_my_courses($userid, $sort="visible DESC,fullname ASC") {
-
-    global $CFG;
-
-    $course = array();
-
-    if ($students = get_records("user_students", "userid", $userid, "", "id, course")) {
-        foreach ($students as $student) {
-            $course[$student->course] = $student->course;
-        }
-    }
-    if ($teachers = get_records("user_teachers", "userid", $userid, "", "id, course")) {
-        foreach ($teachers as $teacher) {
-            $course[$teacher->course] = $teacher->course;
-        }
-    }
-    if (empty($course)) {
-        return $course;
-    }
-
-    $courseids = implode(',', $course);
-
-    return get_records_list("course", "id", $courseids, $sort);
-
-//  The following is correct but VERY slow with large datasets
-//
-//    return get_records_sql("SELECT c.* 
-//                              FROM {$CFG->prefix}course c, 
-//                                   {$CFG->prefix}user_students s, 
-//                                   {$CFG->prefix}user_teachers t 
-//                             WHERE (s.userid = '$userid' AND s.course = c.id)
-//                                OR (t.userid = '$userid' AND t.course = c.id)
-//                             GROUP BY c.id 
-//                             ORDER BY $sort");
-}
-
-
-/**
-* Returns a list of courses that match a search
-* 
-* Returns a list of courses that match a search
-*
-* @param    type description
-*/
-function get_courses_search($searchterms, $sort="fullname ASC", $page=0, $recordsperpage=50, &$totalcount) {
-
-    global $CFG;
-
-    switch ($CFG->dbtype) {
-        case "mysql":
-             $limit = "LIMIT $page,$recordsperpage";
-             break;
-        case "postgres7":
-             $limit = "LIMIT $recordsperpage OFFSET ".($page * $recordsperpage);
-             break;
-        default: 
-             $limit = "LIMIT $recordsperpage,$page";
-    }
-
-    //to allow case-insensitive search for postgesql
-    if ($CFG->dbtype == "postgres7") {
-        $LIKE = "ILIKE";
-        $NOTLIKE = "NOT ILIKE";   // case-insensitive
-        $REGEXP = "~*";
-        $NOTREGEXP = "!~*";
-    } else {
-        $LIKE = "LIKE";
-        $NOTLIKE = "NOT LIKE";
-        $REGEXP = "REGEXP";
-        $NOTREGEXP = "NOT REGEXP";
-    }
-
-    $fullnamesearch = "";
-    $summarysearch = "";
-
-    foreach ($searchterms as $searchterm) {
-        if ($fullnamesearch) {
-            $fullnamesearch .= " AND ";
-        }
-        if ($summarysearch) {
-            $summarysearch .= " AND ";
-        }
-
-        if (substr($searchterm,0,1) == "+") {
-            $searchterm = substr($searchterm,1);
-            $summarysearch .= " summary $REGEXP '(^|[^a-zA-Z0-9])$searchterm([^a-zA-Z0-9]|$)' ";
-            $fullnamesearch .= " fullname $REGEXP '(^|[^a-zA-Z0-9])$searchterm([^a-zA-Z0-9]|$)' ";
-        } else if (substr($searchterm,0,1) == "-") {
-            $searchterm = substr($searchterm,1);
-            $summarysearch .= " summary $NOTREGEXP '(^|[^a-zA-Z0-9])$searchterm([^a-zA-Z0-9]|$)' ";
-            $fullnamesearch .= " fullname $NOTREGEXP '(^|[^a-zA-Z0-9])$searchterm([^a-zA-Z0-9]|$)' ";
-        } else {
-            $summarysearch .= " summary $LIKE '%$searchterm%' ";
-            $fullnamesearch .= " fullname $LIKE '%$searchterm%' ";
-        }
-
-    }
-
-    $selectsql = "{$CFG->prefix}course WHERE ($fullnamesearch OR $summarysearch) AND category > '0'";
-
-    $totalcount = count_records_sql("SELECT COUNT(*) FROM $selectsql");
-
-    $courses = get_records_sql("SELECT * FROM $selectsql ORDER BY $sort $limit"); 
-
-    if ($courses) {  /// Remove unavailable courses from the list
-        foreach ($courses as $key => $course) {
-            if (!$course->visible) {
-                if (!isteacher($course->id)) {
-                    unset($courses[$key]);
-                    $totalcount--;
+        // loop throught them
+        foreach ($courses as $course) {
+            context_helper::preload_from_record($course);
+            if (isset($course->visible) && $course->visible <= 0) {
+                // for hidden courses, require visibility check
+                if (has_capability('moodle/course:viewhiddencourses', context_course::instance($course->id))) {
+                    $visiblecourses [$course->id] = $course;
                 }
+            } else {
+                $visiblecourses [$course->id] = $course;
             }
         }
     }
+    return $visiblecourses;
+}
 
+
+/**
+ * Returns list of courses, for whole site, or category
+ *
+ * Similar to get_courses, but allows paging
+ * Important: Using c.* for fields is extremely expensive because
+ *            we are using distinct. You almost _NEVER_ need all the fields
+ *            in such a large SELECT
+ *
+ * @global object
+ * @global object
+ * @global object
+ * @uses CONTEXT_COURSE
+ * @param string|int $categoryid Either a category id or 'all' for everything
+ * @param string $sort A field and direction to sort by
+ * @param string $fields The additional fields to return
+ * @param int $totalcount Reference for the number of courses
+ * @param string $limitfrom The course to start from
+ * @param string $limitnum The number of courses to limit to
+ * @return array Array of courses
+ */
+function get_courses_page($categoryid="all", $sort="c.sortorder ASC", $fields="c.*",
+                          &$totalcount, $limitfrom="", $limitnum="") {
+    global $USER, $CFG, $DB;
+
+    $params = array();
+
+    $categoryselect = "";
+    if ($categoryid !== "all" && is_numeric($categoryid)) {
+        $categoryselect = "WHERE c.category = :catid";
+        $params['catid'] = $categoryid;
+    } else {
+        $categoryselect = "";
+    }
+
+    $ccselect = ', ' . context_helper::get_preload_record_columns_sql('ctx');
+    $ccjoin = "LEFT JOIN {context} ctx ON (ctx.instanceid = c.id AND ctx.contextlevel = :contextlevel)";
+    $params['contextlevel'] = CONTEXT_COURSE;
+
+    $totalcount = 0;
+    if (!$limitfrom) {
+        $limitfrom = 0;
+    }
+    $visiblecourses = array();
+
+    $sql = "SELECT $fields $ccselect
+              FROM {course} c
+              $ccjoin
+           $categoryselect
+          ORDER BY $sort";
+
+    // pull out all course matching the cat
+    $rs = $DB->get_recordset_sql($sql, $params);
+    // iteration will have to be done inside loop to keep track of the limitfrom and limitnum
+    foreach($rs as $course) {
+        context_helper::preload_from_record($course);
+        if ($course->visible <= 0) {
+            // for hidden courses, require visibility check
+            if (has_capability('moodle/course:viewhiddencourses', context_course::instance($course->id))) {
+                $totalcount++;
+                if ($totalcount > $limitfrom && (!$limitnum or count($visiblecourses) < $limitnum)) {
+                    $visiblecourses [$course->id] = $course;
+                }
+            }
+        } else {
+            $totalcount++;
+            if ($totalcount > $limitfrom && (!$limitnum or count($visiblecourses) < $limitnum)) {
+                $visiblecourses [$course->id] = $course;
+            }
+        }
+    }
+    $rs->close();
+    return $visiblecourses;
+}
+
+/**
+ * A list of courses that match a search
+ *
+ * @global object
+ * @global object
+ * @param array $searchterms An array of search criteria
+ * @param string $sort A field and direction to sort by
+ * @param int $page The page number to get
+ * @param int $recordsperpage The number of records per page
+ * @param int $totalcount Passed in by reference.
+ * @param array $requiredcapabilities Extra list of capabilities used to filter courses
+ * @return object {@link $COURSE} records
+ */
+function get_courses_search($searchterms, $sort, $page, $recordsperpage, &$totalcount,
+                            $requiredcapabilities = array()) {
+    global $CFG, $DB;
+
+    if ($DB->sql_regex_supported()) {
+        $REGEXP    = $DB->sql_regex(true);
+        $NOTREGEXP = $DB->sql_regex(false);
+    }
+
+    $searchcond = array();
+    $params     = array();
+    $i = 0;
+
+    // Thanks Oracle for your non-ansi concat and type limits in coalesce. MDL-29912
+    if ($DB->get_dbfamily() == 'oracle') {
+        $concat = "(c.summary|| ' ' || c.fullname || ' ' || c.idnumber || ' ' || c.shortname)";
+    } else {
+        $concat = $DB->sql_concat("COALESCE(c.summary, '')", "' '", 'c.fullname', "' '", 'c.idnumber', "' '", 'c.shortname');
+    }
+
+    foreach ($searchterms as $searchterm) {
+        $i++;
+
+        $NOT = false; /// Initially we aren't going to perform NOT LIKE searches, only MSSQL and Oracle
+                   /// will use it to simulate the "-" operator with LIKE clause
+
+    /// Under Oracle and MSSQL, trim the + and - operators and perform
+    /// simpler LIKE (or NOT LIKE) queries
+        if (!$DB->sql_regex_supported()) {
+            if (substr($searchterm, 0, 1) == '-') {
+                $NOT = true;
+            }
+            $searchterm = trim($searchterm, '+-');
+        }
+
+        // TODO: +- may not work for non latin languages
+
+        if (substr($searchterm,0,1) == '+') {
+            $searchterm = trim($searchterm, '+-');
+            $searchterm = preg_quote($searchterm, '|');
+            $searchcond[] = "$concat $REGEXP :ss$i";
+            $params['ss'.$i] = "(^|[^a-zA-Z0-9])$searchterm([^a-zA-Z0-9]|$)";
+
+        } else if ((substr($searchterm,0,1) == "-") && (core_text::strlen($searchterm) > 1)) {
+            $searchterm = trim($searchterm, '+-');
+            $searchterm = preg_quote($searchterm, '|');
+            $searchcond[] = "$concat $NOTREGEXP :ss$i";
+            $params['ss'.$i] = "(^|[^a-zA-Z0-9])$searchterm([^a-zA-Z0-9]|$)";
+
+        } else {
+            $searchcond[] = $DB->sql_like($concat,":ss$i", false, true, $NOT);
+            $params['ss'.$i] = "%$searchterm%";
+        }
+    }
+
+    if (empty($searchcond)) {
+        $searchcond = array('1 = 1');
+    }
+
+    $searchcond = implode(" AND ", $searchcond);
+
+    $courses = array();
+    $c = 0; // counts how many visible courses we've seen
+
+    // Tiki pagination
+    $limitfrom = $page * $recordsperpage;
+    $limitto   = $limitfrom + $recordsperpage;
+
+    $ccselect = ', ' . context_helper::get_preload_record_columns_sql('ctx');
+    $ccjoin = "LEFT JOIN {context} ctx ON (ctx.instanceid = c.id AND ctx.contextlevel = :contextlevel)";
+    $params['contextlevel'] = CONTEXT_COURSE;
+
+    $sql = "SELECT c.* $ccselect
+              FROM {course} c
+           $ccjoin
+             WHERE $searchcond AND c.id <> ".SITEID."
+          ORDER BY $sort";
+
+    $rs = $DB->get_recordset_sql($sql, $params);
+    foreach($rs as $course) {
+        // Preload contexts only for hidden courses or courses we need to return.
+        context_helper::preload_from_record($course);
+        $coursecontext = context_course::instance($course->id);
+        if (!$course->visible && !has_capability('moodle/course:viewhiddencourses', $coursecontext)) {
+            continue;
+        }
+        if (!empty($requiredcapabilities)) {
+            if (!has_all_capabilities($requiredcapabilities, $coursecontext)) {
+                continue;
+            }
+        }
+        // Don't exit this loop till the end
+        // we need to count all the visible courses
+        // to update $totalcount
+        if ($c >= $limitfrom && $c < $limitto) {
+            $courses[$course->id] = $course;
+        }
+        $c++;
+    }
+    $rs->close();
+
+    // our caller expects 2 bits of data - our return
+    // array, and an updated $totalcount
+    $totalcount = $c;
     return $courses;
 }
 
+/**
+ * Fixes course category and course sortorder, also verifies category and course parents and paths.
+ * (circular references are not fixed)
+ *
+ * @global object
+ * @global object
+ * @uses MAX_COURSES_IN_CATEGORY
+ * @uses MAX_COURSE_CATEGORIES
+ * @uses SITEID
+ * @uses CONTEXT_COURSE
+ * @return void
+ */
+function fix_course_sortorder() {
+    global $DB, $SITE;
+
+    //WARNING: this is PHP5 only code!
+
+    // if there are any changes made to courses or categories we will trigger
+    // the cache events to purge all cached courses/categories data
+    $cacheevents = array();
+
+    if ($unsorted = $DB->get_records('course_categories', array('sortorder'=>0))) {
+        //move all categories that are not sorted yet to the end
+        $DB->set_field('course_categories', 'sortorder', MAX_COURSES_IN_CATEGORY*MAX_COURSE_CATEGORIES, array('sortorder'=>0));
+        $cacheevents['changesincoursecat'] = true;
+    }
+
+    $allcats = $DB->get_records('course_categories', null, 'sortorder, id', 'id, sortorder, parent, depth, path');
+    $topcats    = array();
+    $brokencats = array();
+    foreach ($allcats as $cat) {
+        $sortorder = (int)$cat->sortorder;
+        if (!$cat->parent) {
+            while(isset($topcats[$sortorder])) {
+                $sortorder++;
+            }
+            $topcats[$sortorder] = $cat;
+            continue;
+        }
+        if (!isset($allcats[$cat->parent])) {
+            $brokencats[] = $cat;
+            continue;
+        }
+        if (!isset($allcats[$cat->parent]->children)) {
+            $allcats[$cat->parent]->children = array();
+        }
+        while(isset($allcats[$cat->parent]->children[$sortorder])) {
+            $sortorder++;
+        }
+        $allcats[$cat->parent]->children[$sortorder] = $cat;
+    }
+    unset($allcats);
+
+    // add broken cats to category tree
+    if ($brokencats) {
+        $defaultcat = reset($topcats);
+        foreach ($brokencats as $cat) {
+            $topcats[] = $cat;
+        }
+    }
+
+    // now walk recursively the tree and fix any problems found
+    $sortorder = 0;
+    $fixcontexts = array();
+    if (_fix_course_cats($topcats, $sortorder, 0, 0, '', $fixcontexts)) {
+        $cacheevents['changesincoursecat'] = true;
+    }
+
+    // detect if there are "multiple" frontpage courses and fix them if needed
+    $frontcourses = $DB->get_records('course', array('category'=>0), 'id');
+    if (count($frontcourses) > 1) {
+        if (isset($frontcourses[SITEID])) {
+            $frontcourse = $frontcourses[SITEID];
+            unset($frontcourses[SITEID]);
+        } else {
+            $frontcourse = array_shift($frontcourses);
+        }
+        $defaultcat = reset($topcats);
+        foreach ($frontcourses as $course) {
+            $DB->set_field('course', 'category', $defaultcat->id, array('id'=>$course->id));
+            $context = context_course::instance($course->id);
+            $fixcontexts[$context->id] = $context;
+            $cacheevents['changesincourse'] = true;
+        }
+        unset($frontcourses);
+    } else {
+        $frontcourse = reset($frontcourses);
+    }
+
+    // now fix the paths and depths in context table if needed
+    if ($fixcontexts) {
+        foreach ($fixcontexts as $fixcontext) {
+            $fixcontext->reset_paths(false);
+        }
+        context_helper::build_all_paths(false);
+        unset($fixcontexts);
+        $cacheevents['changesincourse'] = true;
+        $cacheevents['changesincoursecat'] = true;
+    }
+
+    // release memory
+    unset($topcats);
+    unset($brokencats);
+    unset($fixcontexts);
+
+    // fix frontpage course sortorder
+    if ($frontcourse->sortorder != 1) {
+        $DB->set_field('course', 'sortorder', 1, array('id'=>$frontcourse->id));
+        $cacheevents['changesincourse'] = true;
+    }
+
+    // now fix the course counts in category records if needed
+    $sql = "SELECT cc.id, cc.coursecount, COUNT(c.id) AS newcount
+              FROM {course_categories} cc
+              LEFT JOIN {course} c ON c.category = cc.id
+          GROUP BY cc.id, cc.coursecount
+            HAVING cc.coursecount <> COUNT(c.id)";
+
+    if ($updatecounts = $DB->get_records_sql($sql)) {
+        // categories with more courses than MAX_COURSES_IN_CATEGORY
+        $categories = array();
+        foreach ($updatecounts as $cat) {
+            $cat->coursecount = $cat->newcount;
+            if ($cat->coursecount >= MAX_COURSES_IN_CATEGORY) {
+                $categories[] = $cat->id;
+            }
+            unset($cat->newcount);
+            $DB->update_record_raw('course_categories', $cat, true);
+        }
+        if (!empty($categories)) {
+            $str = implode(', ', $categories);
+            debugging("The number of courses (category id: $str) has reached MAX_COURSES_IN_CATEGORY (" . MAX_COURSES_IN_CATEGORY . "), it will cause a sorting performance issue, please increase the value of MAX_COURSES_IN_CATEGORY in lib/datalib.php file. See tracker issue: MDL-25669", DEBUG_DEVELOPER);
+        }
+        $cacheevents['changesincoursecat'] = true;
+    }
+
+    // now make sure that sortorders in course table are withing the category sortorder ranges
+    $sql = "SELECT DISTINCT cc.id, cc.sortorder
+              FROM {course_categories} cc
+              JOIN {course} c ON c.category = cc.id
+             WHERE c.sortorder < cc.sortorder OR c.sortorder > cc.sortorder + ".MAX_COURSES_IN_CATEGORY;
+
+    if ($fixcategories = $DB->get_records_sql($sql)) {
+        //fix the course sortorder ranges
+        foreach ($fixcategories as $cat) {
+            $sql = "UPDATE {course}
+                       SET sortorder = ".$DB->sql_modulo('sortorder', MAX_COURSES_IN_CATEGORY)." + ?
+                     WHERE category = ?";
+            $DB->execute($sql, array($cat->sortorder, $cat->id));
+        }
+        $cacheevents['changesincoursecat'] = true;
+    }
+    unset($fixcategories);
+
+    // categories having courses with sortorder duplicates or having gaps in sortorder
+    $sql = "SELECT DISTINCT c1.category AS id , cc.sortorder
+              FROM {course} c1
+              JOIN {course} c2 ON c1.sortorder = c2.sortorder
+              JOIN {course_categories} cc ON (c1.category = cc.id)
+             WHERE c1.id <> c2.id";
+    $fixcategories = $DB->get_records_sql($sql);
+
+    $sql = "SELECT cc.id, cc.sortorder, cc.coursecount, MAX(c.sortorder) AS maxsort, MIN(c.sortorder) AS minsort
+              FROM {course_categories} cc
+              JOIN {course} c ON c.category = cc.id
+          GROUP BY cc.id, cc.sortorder, cc.coursecount
+            HAVING (MAX(c.sortorder) <>  cc.sortorder + cc.coursecount) OR (MIN(c.sortorder) <>  cc.sortorder + 1)";
+    $gapcategories = $DB->get_records_sql($sql);
+
+    foreach ($gapcategories as $cat) {
+        if (isset($fixcategories[$cat->id])) {
+            // duplicates detected already
+
+        } else if ($cat->minsort == $cat->sortorder and $cat->maxsort == $cat->sortorder + $cat->coursecount - 1) {
+            // easy - new course inserted with sortorder 0, the rest is ok
+            $sql = "UPDATE {course}
+                       SET sortorder = sortorder + 1
+                     WHERE category = ?";
+            $DB->execute($sql, array($cat->id));
+
+        } else {
+            // it needs full resorting
+            $fixcategories[$cat->id] = $cat;
+        }
+        $cacheevents['changesincourse'] = true;
+    }
+    unset($gapcategories);
+
+    // fix course sortorders in problematic categories only
+    foreach ($fixcategories as $cat) {
+        $i = 1;
+        $courses = $DB->get_records('course', array('category'=>$cat->id), 'sortorder ASC, id DESC', 'id, sortorder');
+        foreach ($courses as $course) {
+            if ($course->sortorder != $cat->sortorder + $i) {
+                $course->sortorder = $cat->sortorder + $i;
+                $DB->update_record_raw('course', $course, true);
+                $cacheevents['changesincourse'] = true;
+            }
+            $i++;
+        }
+    }
+
+    // advise all caches that need to be rebuilt
+    foreach (array_keys($cacheevents) as $event) {
+        cache_helper::purge_by_event($event);
+    }
+}
 
 /**
-* Returns a sorted list of categories
-* 
-* Returns a sorted list of categories
-*
-* @param    type description
-*/
-function get_categories($parent="none", $sort="sortorder ASC") {
+ * Internal recursive category verification function, do not use directly!
+ *
+ * @todo Document the arguments of this function better
+ *
+ * @global object
+ * @uses MAX_COURSES_IN_CATEGORY
+ * @uses CONTEXT_COURSECAT
+ * @param array $children
+ * @param int $sortorder
+ * @param string $parent
+ * @param int $depth
+ * @param string $path
+ * @param array $fixcontexts
+ * @return bool if changes were made
+ */
+function _fix_course_cats($children, &$sortorder, $parent, $depth, $path, &$fixcontexts) {
+    global $DB;
 
-    if ($parent == "none") {
-        $categories = get_records("course_categories", "", "", $sort);
-    } else {
-        $categories = get_records("course_categories", "parent", $parent, $sort);
-    }
-    if ($categories) {  /// Remove unavailable categories from the list
-        $creator = iscreator();
-        foreach ($categories as $key => $category) {
-            if (!$category->visible) {
-                if (!$creator) {
-                    unset($categories[$key]);
-                }
+    $depth++;
+    $changesmade = false;
+
+    foreach ($children as $cat) {
+        $sortorder = $sortorder + MAX_COURSES_IN_CATEGORY;
+        $update = false;
+        if ($parent != $cat->parent or $depth != $cat->depth or $path.'/'.$cat->id != $cat->path) {
+            $cat->parent = $parent;
+            $cat->depth  = $depth;
+            $cat->path   = $path.'/'.$cat->id;
+            $update = true;
+
+            // make sure context caches are rebuild and dirty contexts marked
+            $context = context_coursecat::instance($cat->id);
+            $fixcontexts[$context->id] = $context;
+        }
+        if ($cat->sortorder != $sortorder) {
+            $cat->sortorder = $sortorder;
+            $update = true;
+        }
+        if ($update) {
+            $DB->update_record('course_categories', $cat, true);
+            $changesmade = true;
+        }
+        if (isset($cat->children)) {
+            if (_fix_course_cats($cat->children, $sortorder, $cat->id, $cat->depth, $cat->path, $fixcontexts)) {
+                $changesmade = true;
             }
         }
     }
-    return $categories;
+    return $changesmade;
+}
+
+/**
+ * List of remote courses that a user has access to via MNET.
+ * Works only on the IDP
+ *
+ * @global object
+ * @global object
+ * @param int @userid The user id to get remote courses for
+ * @return array Array of {@link $COURSE} of course objects
+ */
+function get_my_remotecourses($userid=0) {
+    global $DB, $USER;
+
+    if (empty($userid)) {
+        $userid = $USER->id;
+    }
+
+    // we can not use SELECT DISTINCT + text field (summary) because of MS SQL and Oracle, subselect used therefore
+    $sql = "SELECT c.id, c.remoteid, c.shortname, c.fullname,
+                   c.hostid, c.summary, c.summaryformat, c.categoryname AS cat_name,
+                   h.name AS hostname
+              FROM {mnetservice_enrol_courses} c
+              JOIN (SELECT DISTINCT hostid, remotecourseid
+                      FROM {mnetservice_enrol_enrolments}
+                     WHERE userid = ?
+                   ) e ON (e.hostid = c.hostid AND e.remotecourseid = c.remoteid)
+              JOIN {mnet_host} h ON h.id = c.hostid";
+
+    return $DB->get_records_sql($sql, array($userid));
+}
+
+/**
+ * List of remote hosts that a user has access to via MNET.
+ * Works on the SP
+ *
+ * @global object
+ * @global object
+ * @return array|bool Array of host objects or false
+ */
+function get_my_remotehosts() {
+    global $CFG, $USER;
+
+    if ($USER->mnethostid == $CFG->mnet_localhost_id) {
+        return false; // Return nothing on the IDP
+    }
+    if (!empty($USER->mnet_foreign_host_array) && is_array($USER->mnet_foreign_host_array)) {
+        return $USER->mnet_foreign_host_array;
+    }
+    return false;
 }
 
 
 /**
-* reconcile $courseorder with a category object
-* 
-* Given a category object, this function makes sure the courseorder 
-* variable reflects the real world.
-*
-* @param    type description
-*/
-function fix_course_sortorder($categoryid, $sort="sortorder ASC") {
-
-    if (!$courses = get_records("course", "category", "$categoryid", "$sort", "id, sortorder")) {
-        set_field("course_categories", "coursecount", 0, "id", $categoryid);
-        return true;
-    }
-
-    $count = 0;
-    $modified = false;
-
-    foreach ($courses as $course) {
-        if ($course->sortorder != $count) {
-            set_field("course", "sortorder", $count, "id", $course->id);
-            $modified = true;
-        }
-        $count++;
-    }
-
-    if ($modified) {
-        set_field("course_categories", "timemodified", time(), "id", $categoryid);
-    }
-    set_field("course_categories", "coursecount", $count, "id", $categoryid);
-
-    return true;
-}
-
-/**
-* This function creates a default separated/connected scale
-* 
-* This function creates a default separated/connected scale
-* so there's something in the database.  The locations of 
-* strings and files is a bit odd, but this is because we 
-* need to maintain backward compatibility with many different
-* existing language translations and older sites.
-*
-* @param    type description
-*/
-function make_default_scale() {
-
-    global $CFG;
-
-    $defaultscale = NULL;
-    $defaultscale->courseid = 0;
-    $defaultscale->userid = 0;
-    $defaultscale->name  = get_string("separateandconnected");
-    $defaultscale->scale = get_string("postrating1", "forum").",".
-                           get_string("postrating2", "forum").",".
-                           get_string("postrating3", "forum");
-    $defaultscale->timemodified = time();
-
-    /// Read in the big description from the file.  Note this is not 
-    /// HTML (despite the file extension) but Moodle format text.
-    $parentlang = get_string("parentlang");
-    if (is_readable("$CFG->dirroot/lang/$CFG->lang/help/forum/ratings.html")) {
-        $file = file("$CFG->dirroot/lang/$CFG->lang/help/forum/ratings.html");
-    } else if ($parentlang and is_readable("$CFG->dirroot/lang/$parentlang/help/forum/ratings.html")) {
-        $file = file("$CFG->dirroot/lang/$parentlang/help/forum/ratings.html");
-    } else if (is_readable("$CFG->dirroot/lang/en/help/forum/ratings.html")) {
-        $file = file("$CFG->dirroot/lang/en/help/forum/ratings.html");
-    } else {
-        $file = "";
-    }
-
-    $defaultscale->description = addslashes(implode("", $file));
-
-    if ($defaultscale->id = insert_record("scale", $defaultscale)) {
-        execute_sql("UPDATE {$CFG->prefix}forum SET scale = '$defaultscale->id'", false);
-    }
-}
-
-/**
-* Returns a menu of all available scales from the site as well as the given course
-* 
-* Returns a menu of all available scales from the site as well as the given course
-*
-* @param    type description
-*/
+ * Returns a menu of all available scales from the site as well as the given course
+ *
+ * @global object
+ * @param int $courseid The id of the course as found in the 'course' table.
+ * @return array
+ */
 function get_scales_menu($courseid=0) {
+    global $DB;
 
-    global $CFG;
-    
-    $sql = "SELECT id, name FROM {$CFG->prefix}scale 
-             WHERE courseid = '0' or courseid = '$courseid' 
+    $sql = "SELECT id, name
+              FROM {scale}
+             WHERE courseid = 0 or courseid = ?
           ORDER BY courseid ASC, name ASC";
+    $params = array($courseid);
 
-    if ($scales = get_records_sql_menu("$sql")) {
-        return $scales;
-    }
-
-    make_default_scale();
-
-    return get_records_sql_menu("$sql");
+    return $scales = $DB->get_records_sql_menu($sql, $params);
 }
+
+/**
+ * Increment standard revision field.
+ *
+ * The revision are based on current time and are incrementing.
+ * There is a protection for runaway revisions, it may not go further than
+ * one hour into future.
+ *
+ * The field has to be XMLDB_TYPE_INTEGER with size 10.
+ *
+ * @param string $table
+ * @param string $field name of the field containing revision
+ * @param string $select use empty string when updating all records
+ * @param array $params optional select parameters
+ */
+function increment_revision_number($table, $field, $select, array $params = null) {
+    global $DB;
+
+    $now = time();
+    $sql = "UPDATE {{$table}}
+                   SET $field = (CASE
+                       WHEN $field IS NULL THEN $now
+                       WHEN $field < $now THEN $now
+                       WHEN $field > $now + 3600 THEN $now
+                       ELSE $field + 1 END)";
+    if ($select) {
+        $sql = $sql . " WHERE $select";
+    }
+    $DB->execute($sql, $params);
+}
+
 
 /// MODULE FUNCTIONS /////////////////////////////////////////////////
 
 /**
-* Just gets a raw list of all modules in a course
-* 
-* Just gets a raw list of all modules in a course
-*
-* @param    type description
-*/
+ * Just gets a raw list of all modules in a course
+ *
+ * @global object
+ * @param int $courseid The id of the course as found in the 'course' table.
+ * @return array
+ */
 function get_course_mods($courseid) {
-    global $CFG;
+    global $DB;
 
-    return get_records_sql("SELECT cm.*, m.name as modname
-                            FROM {$CFG->prefix}modules m, 
-                                 {$CFG->prefix}course_modules cm
-                            WHERE cm.course = '$courseid' 
-                            AND cm.deleted = '0'
-                            AND cm.module = m.id ");
-}
-
-/**
-* Given an instance of a module, finds the coursemodule description
-* 
-* Given an instance of a module, finds the coursemodule description
-*
-* @param    type description
-*/
-function get_coursemodule_from_instance($modulename, $instance, $courseid) {
-
-    global $CFG;
-
-    return get_record_sql("SELECT cm.*, m.name
-                           FROM {$CFG->prefix}course_modules cm, 
-                                {$CFG->prefix}modules md, 
-                                {$CFG->prefix}$modulename m 
-                           WHERE cm.course = '$courseid' AND 
-                                 cm.deleted = '0' AND
-                                 cm.instance = m.id AND 
-                                 md.name = '$modulename' AND 
-                                 md.id = cm.module AND
-                                 m.id = '$instance'");
-
-}
-
-/**
-* Returns an array of all the active instances of a particular module in a given course, sorted in the order they are defined
-* 
-* Returns an array of all the active instances of a particular
-* module in a given course, sorted in the order they are defined
-* in the course.   Returns false on any errors.
-*
-* @param    string  $modulename the name of the module to get instances for
-* @param        object(course)  $course this depends on an accurate $course->modinfo
-*/
-function get_all_instances_in_course($modulename, $course) {
-
-    global $CFG;
-
-    if (!$modinfo = unserialize($course->modinfo)) {
-        return array();
+    if (empty($courseid)) {
+        return false; // avoid warnings
     }
 
-    if (!$rawmods = get_records_sql("SELECT cm.id as coursemodule, m.*,cw.section,cm.visible as visible,cm.groupmode
-                            FROM {$CFG->prefix}course_modules cm, 
-                                 {$CFG->prefix}course_sections cw, 
-                                 {$CFG->prefix}modules md, 
-                                 {$CFG->prefix}$modulename m 
-                            WHERE cm.course = '$course->id' AND 
-                                  cm.instance = m.id AND 
-                                  cm.deleted = '0' AND
-                                  cm.section = cw.id AND 
-                                  md.name = '$modulename' AND 
-                                  md.id = cm.module")) {
-        return array();
-    }
+    return $DB->get_records_sql("SELECT cm.*, m.name as modname
+                                   FROM {modules} m, {course_modules} cm
+                                  WHERE cm.course = ? AND cm.module = m.id AND m.visible = 1",
+                                array($courseid)); // no disabled mods
+}
 
-    // Hide non-visible instances from students
-    if (isteacher($course->id)) {
-        $invisible = -1;
+
+/**
+ * Given an id of a course module, finds the coursemodule description
+ *
+ * Please note that this function performs 1-2 DB queries. When possible use cached
+ * course modinfo. For example get_fast_modinfo($courseorid)->get_cm($cmid)
+ * See also {@link cm_info::get_course_module_record()}
+ *
+ * @global object
+ * @param string $modulename name of module type, eg. resource, assignment,... (optional, slower and less safe if not specified)
+ * @param int $cmid course module id (id in course_modules table)
+ * @param int $courseid optional course id for extra validation
+ * @param bool $sectionnum include relative section number (0,1,2 ...)
+ * @param int $strictness IGNORE_MISSING means compatible mode, false returned if record not found, debug message if more found;
+ *                        IGNORE_MULTIPLE means return first, ignore multiple records found(not recommended);
+ *                        MUST_EXIST means throw exception if no record or multiple records found
+ * @return stdClass
+ */
+function get_coursemodule_from_id($modulename, $cmid, $courseid=0, $sectionnum=false, $strictness=IGNORE_MISSING) {
+    global $DB;
+
+    $params = array('cmid'=>$cmid);
+
+    if (!$modulename) {
+        if (!$modulename = $DB->get_field_sql("SELECT md.name
+                                                 FROM {modules} md
+                                                 JOIN {course_modules} cm ON cm.module = md.id
+                                                WHERE cm.id = :cmid", $params, $strictness)) {
+            return false;
+        }
     } else {
-        $invisible = 0;
+        if (!core_component::is_valid_plugin_name('mod', $modulename)) {
+            throw new coding_exception('Invalid modulename parameter');
+        }
     }
 
-    foreach ($modinfo as $mod) {
-        if ($mod->mod == $modulename and $mod->visible > $invisible) {
-            $instance = $rawmods[$mod->cm];
-            if (!empty($mod->extra)) {
-                $instance->extra = $mod->extra;
+    $params['modulename'] = $modulename;
+
+    $courseselect = "";
+    $sectionfield = "";
+    $sectionjoin  = "";
+
+    if ($courseid) {
+        $courseselect = "AND cm.course = :courseid";
+        $params['courseid'] = $courseid;
+    }
+
+    if ($sectionnum) {
+        $sectionfield = ", cw.section AS sectionnum";
+        $sectionjoin  = "LEFT JOIN {course_sections} cw ON cw.id = cm.section";
+    }
+
+    $sql = "SELECT cm.*, m.name, md.name AS modname $sectionfield
+              FROM {course_modules} cm
+                   JOIN {modules} md ON md.id = cm.module
+                   JOIN {".$modulename."} m ON m.id = cm.instance
+                   $sectionjoin
+             WHERE cm.id = :cmid AND md.name = :modulename
+                   $courseselect";
+
+    return $DB->get_record_sql($sql, $params, $strictness);
+}
+
+/**
+ * Given an instance number of a module, finds the coursemodule description
+ *
+ * Please note that this function performs DB query. When possible use cached course
+ * modinfo. For example get_fast_modinfo($courseorid)->instances[$modulename][$instance]
+ * See also {@link cm_info::get_course_module_record()}
+ *
+ * @global object
+ * @param string $modulename name of module type, eg. resource, assignment,...
+ * @param int $instance module instance number (id in resource, assignment etc. table)
+ * @param int $courseid optional course id for extra validation
+ * @param bool $sectionnum include relative section number (0,1,2 ...)
+ * @param int $strictness IGNORE_MISSING means compatible mode, false returned if record not found, debug message if more found;
+ *                        IGNORE_MULTIPLE means return first, ignore multiple records found(not recommended);
+ *                        MUST_EXIST means throw exception if no record or multiple records found
+ * @return stdClass
+ */
+function get_coursemodule_from_instance($modulename, $instance, $courseid=0, $sectionnum=false, $strictness=IGNORE_MISSING) {
+    global $DB;
+
+    if (!core_component::is_valid_plugin_name('mod', $modulename)) {
+        throw new coding_exception('Invalid modulename parameter');
+    }
+
+    $params = array('instance'=>$instance, 'modulename'=>$modulename);
+
+    $courseselect = "";
+    $sectionfield = "";
+    $sectionjoin  = "";
+
+    if ($courseid) {
+        $courseselect = "AND cm.course = :courseid";
+        $params['courseid'] = $courseid;
+    }
+
+    if ($sectionnum) {
+        $sectionfield = ", cw.section AS sectionnum";
+        $sectionjoin  = "LEFT JOIN {course_sections} cw ON cw.id = cm.section";
+    }
+
+    $sql = "SELECT cm.*, m.name, md.name AS modname $sectionfield
+              FROM {course_modules} cm
+                   JOIN {modules} md ON md.id = cm.module
+                   JOIN {".$modulename."} m ON m.id = cm.instance
+                   $sectionjoin
+             WHERE m.id = :instance AND md.name = :modulename
+                   $courseselect";
+
+    return $DB->get_record_sql($sql, $params, $strictness);
+}
+
+/**
+ * Returns all course modules of given activity in course
+ *
+ * @param string $modulename The module name (forum, quiz, etc.)
+ * @param int $courseid The course id to get modules for
+ * @param string $extrafields extra fields starting with m.
+ * @return array Array of results
+ */
+function get_coursemodules_in_course($modulename, $courseid, $extrafields='') {
+    global $DB;
+
+    if (!core_component::is_valid_plugin_name('mod', $modulename)) {
+        throw new coding_exception('Invalid modulename parameter');
+    }
+
+    if (!empty($extrafields)) {
+        $extrafields = ", $extrafields";
+    }
+    $params = array();
+    $params['courseid'] = $courseid;
+    $params['modulename'] = $modulename;
+
+
+    return $DB->get_records_sql("SELECT cm.*, m.name, md.name as modname $extrafields
+                                   FROM {course_modules} cm, {modules} md, {".$modulename."} m
+                                  WHERE cm.course = :courseid AND
+                                        cm.instance = m.id AND
+                                        md.name = :modulename AND
+                                        md.id = cm.module", $params);
+}
+
+/**
+ * Returns an array of all the active instances of a particular module in given courses, sorted in the order they are defined
+ *
+ * Returns an array of all the active instances of a particular
+ * module in given courses, sorted in the order they are defined
+ * in the course. Returns an empty array on any errors.
+ *
+ * The returned objects includle the columns cw.section, cm.visible,
+ * cm.groupmode, and cm.groupingid, and are indexed by cm.id.
+ *
+ * @global object
+ * @global object
+ * @param string $modulename The name of the module to get instances for
+ * @param array $courses an array of course objects.
+ * @param int $userid
+ * @param int $includeinvisible
+ * @return array of module instance objects, including some extra fields from the course_modules
+ *          and course_sections tables, or an empty array if an error occurred.
+ */
+function get_all_instances_in_courses($modulename, $courses, $userid=NULL, $includeinvisible=false) {
+    global $CFG, $DB;
+
+    if (!core_component::is_valid_plugin_name('mod', $modulename)) {
+        throw new coding_exception('Invalid modulename parameter');
+    }
+
+    $outputarray = array();
+
+    if (empty($courses) || !is_array($courses) || count($courses) == 0) {
+        return $outputarray;
+    }
+
+    list($coursessql, $params) = $DB->get_in_or_equal(array_keys($courses), SQL_PARAMS_NAMED, 'c0');
+    $params['modulename'] = $modulename;
+
+    if (!$rawmods = $DB->get_records_sql("SELECT cm.id AS coursemodule, m.*, cw.section, cm.visible AS visible,
+                                                 cm.groupmode, cm.groupingid
+                                            FROM {course_modules} cm, {course_sections} cw, {modules} md,
+                                                 {".$modulename."} m
+                                           WHERE cm.course $coursessql AND
+                                                 cm.instance = m.id AND
+                                                 cm.section = cw.id AND
+                                                 md.name = :modulename AND
+                                                 md.id = cm.module", $params)) {
+        return $outputarray;
+    }
+
+    foreach ($courses as $course) {
+        $modinfo = get_fast_modinfo($course, $userid);
+
+        if (empty($modinfo->instances[$modulename])) {
+            continue;
+        }
+
+        foreach ($modinfo->instances[$modulename] as $cm) {
+            if (!$includeinvisible and !$cm->uservisible) {
+                continue;
+            }
+            if (!isset($rawmods[$cm->id])) {
+                continue;
+            }
+            $instance = $rawmods[$cm->id];
+            if (!empty($cm->extra)) {
+                $instance->extra = $cm->extra;
             }
             $outputarray[] = $instance;
         }
     }
 
     return $outputarray;
+}
 
+/**
+ * Returns an array of all the active instances of a particular module in a given course,
+ * sorted in the order they are defined.
+ *
+ * Returns an array of all the active instances of a particular
+ * module in a given course, sorted in the order they are defined
+ * in the course. Returns an empty array on any errors.
+ *
+ * The returned objects includle the columns cw.section, cm.visible,
+ * cm.groupmode, and cm.groupingid, and are indexed by cm.id.
+ *
+ * Simply calls {@link all_instances_in_courses()} with a single provided course
+ *
+ * @param string $modulename The name of the module to get instances for
+ * @param object $course The course obect.
+ * @return array of module instance objects, including some extra fields from the course_modules
+ *          and course_sections tables, or an empty array if an error occurred.
+ * @param int $userid
+ * @param int $includeinvisible
+ */
+function get_all_instances_in_course($modulename, $course, $userid=NULL, $includeinvisible=false) {
+    return get_all_instances_in_courses($modulename, array($course->id => $course), $userid, $includeinvisible);
 }
 
 
 /**
-* determine whether a module instance is visible within a course
-* 
-* Given a valid module object with info about the id and course, 
-* and the module's type (eg "forum") returns whether the object 
-* is visible or not
-*
-* @param    type description
-*/
+ * Determine whether a module instance is visible within a course
+ *
+ * Given a valid module object with info about the id and course,
+ * and the module's type (eg "forum") returns whether the object
+ * is visible or not according to the 'eye' icon only.
+ *
+ * NOTE: This does NOT take into account visibility to a particular user.
+ * To get visibility access for a specific user, use get_fast_modinfo, get a
+ * cm_info object from this, and check the ->uservisible property; or use
+ * the \core_availability\info_module::is_user_visible() static function.
+ *
+ * @global object
+
+ * @param $moduletype Name of the module eg 'forum'
+ * @param $module Object which is the instance of the module
+ * @return bool Success
+ */
 function instance_is_visible($moduletype, $module) {
+    global $DB;
 
-    global $CFG;
+    if (!empty($module->id)) {
+        $params = array('courseid'=>$module->course, 'moduletype'=>$moduletype, 'moduleid'=>$module->id);
+        if ($records = $DB->get_records_sql("SELECT cm.instance, cm.visible, cm.groupingid, cm.id, cm.course
+                                               FROM {course_modules} cm, {modules} m
+                                              WHERE cm.course = :courseid AND
+                                                    cm.module = m.id AND
+                                                    m.name = :moduletype AND
+                                                    cm.instance = :moduleid", $params)) {
 
-    if ($records = get_records_sql("SELECT cm.instance, cm.visible
-                                    FROM {$CFG->prefix}course_modules cm,
-                                         {$CFG->prefix}modules m
-                                   WHERE cm.course = '$module->course' AND
-                                         cm.module = m.id AND 
-                                         m.name = '$moduletype' AND 
-                                         cm.instance = '$module->id'")) { 
-
-        foreach ($records as $record) { // there should only be one - use the first one
-            return $record->visible;
+            foreach ($records as $record) { // there should only be one - use the first one
+                return $record->visible;
+            }
         }
     }
-
     return true;  // visible by default!
 }
 
 
-
-
 /// LOG FUNCTIONS /////////////////////////////////////////////////////
 
+/**
+ * Get instance of log manager.
+ *
+ * @param bool $forcereload
+ * @return \core\log\manager
+ */
+function get_log_manager($forcereload = false) {
+    /** @var \core\log\manager $singleton */
+    static $singleton = null;
+
+    if ($forcereload and isset($singleton)) {
+        $singleton->dispose();
+        $singleton = null;
+    }
+
+    if (isset($singleton)) {
+        return $singleton;
+    }
+
+    $classname = '\tool_log\log\manager';
+    if (defined('LOG_MANAGER_CLASS')) {
+        $classname = LOG_MANAGER_CLASS;
+    }
+
+    if (!class_exists($classname)) {
+        if (!empty($classname)) {
+            debugging("Cannot find log manager class '$classname'.", DEBUG_DEVELOPER);
+        }
+        $classname = '\core\log\dummy_manager';
+    }
+
+    $singleton = new $classname();
+    return $singleton;
+}
 
 /**
-* Add an entry to the log table.
-* 
-* Add an entry to the log table.  These are "action" focussed rather
-* than web server hits, and provide a way to easily reconstruct what 
-* any particular student has been doing.
-*
-* @param    int     $course  the course id
-* @param    string  $module  the module name - e.g. forum, journal, resource, course, user etc
-* @param    string  $action  view, edit, post (often but not always the same as the file.php)
-* @param    string  $url     the file and parameters used to see the results of the action
-* @param    string  $info    additional description information 
-* @param    string  $cm      the course_module->id if there is one
-* @param    string  $user    if log regards $user other than $USER
-*/
-function add_to_log($courseid, $module, $action, $url="", $info="", $cm=0, $user=0) {
+ * Add an entry to the config log table.
+ *
+ * These are "action" focussed rather than web server hits,
+ * and provide a way to easily reconstruct changes to Moodle configuration.
+ *
+ * @package core
+ * @category log
+ * @global moodle_database $DB
+ * @global stdClass $USER
+ * @param    string  $name     The name of the configuration change action
+                               For example 'filter_active' when activating or deactivating a filter
+ * @param    string  $oldvalue The config setting's previous value
+ * @param    string  $value    The config setting's new value
+ * @param    string  $plugin   Plugin name, for example a filter name when changing filter configuration
+ * @return void
+ */
+function add_to_config_log($name, $oldvalue, $value, $plugin) {
+    global $USER, $DB;
 
-    global $db, $CFG, $USER, $REMOTE_ADDR;
+    $log = new stdClass();
+    $log->userid       = during_initial_install() ? 0 :$USER->id; // 0 as user id during install
+    $log->timemodified = time();
+    $log->name         = $name;
+    $log->oldvalue  = $oldvalue;
+    $log->value     = $value;
+    $log->plugin    = $plugin;
+    $DB->insert_record('config_log', $log);
+}
 
-    if ($user) {
-        $userid = $user;
-    } else {
-        if (isset($USER->realuser)) {  // Don't log
-            return;
-        }
-        $userid = empty($USER->id) ? "" : $USER->id;
+/**
+ * Store user last access times - called when use enters a course or site
+ *
+ * @package core
+ * @category log
+ * @global stdClass $USER
+ * @global stdClass $CFG
+ * @global moodle_database $DB
+ * @uses LASTACCESS_UPDATE_SECS
+ * @uses SITEID
+ * @param int $courseid  empty courseid means site
+ * @return void
+ */
+function user_accesstime_log($courseid=0) {
+    global $USER, $CFG, $DB;
+
+    if (!isloggedin() or \core\session\manager::is_loggedinas()) {
+        // no access tracking
+        return;
+    }
+
+    if (isguestuser()) {
+        // Do not update guest access times/ips for performance.
+        return;
+    }
+
+    if (empty($courseid)) {
+        $courseid = SITEID;
     }
 
     $timenow = time();
-    $info = addslashes($info);
 
-    $result = $db->Execute("INSERT INTO {$CFG->prefix}log (time, userid, course, ip, module, cmid, action, url, info)
-        VALUES ('$timenow', '$userid', '$courseid', '$REMOTE_ADDR', '$module', '$cm', '$action', '$url', '$info')");
+/// Store site lastaccess time for the current user
+    if ($timenow - $USER->lastaccess > LASTACCESS_UPDATE_SECS) {
+    /// Update $USER->lastaccess for next checks
+        $USER->lastaccess = $timenow;
 
-    if (!$result and ($CFG->debug > 7)) {
-        echo "<P>Error: Could not insert a new entry to the Moodle log</P>";  // Don't throw an error
-    }    
-    if (!$user) {
-        if (isstudent($courseid)) {
-            $db->Execute("UPDATE {$CFG->prefix}user_students SET timeaccess = '$timenow' ".
-                         "WHERE course = '$courseid' AND userid = '$userid'");
+        $last = new stdClass();
+        $last->id         = $USER->id;
+        $last->lastip     = getremoteaddr();
+        $last->lastaccess = $timenow;
+
+        $DB->update_record_raw('user', $last);
+    }
+
+    if ($courseid == SITEID) {
+    ///  no user_lastaccess for frontpage
+        return;
+    }
+
+/// Store course lastaccess times for the current user
+    if (empty($USER->currentcourseaccess[$courseid]) or ($timenow - $USER->currentcourseaccess[$courseid] > LASTACCESS_UPDATE_SECS)) {
+
+        $lastaccess = $DB->get_field('user_lastaccess', 'timeaccess', array('userid'=>$USER->id, 'courseid'=>$courseid));
+
+        if ($lastaccess === false) {
+            // Update course lastaccess for next checks
+            $USER->currentcourseaccess[$courseid] = $timenow;
+
+            $last = new stdClass();
+            $last->userid     = $USER->id;
+            $last->courseid   = $courseid;
+            $last->timeaccess = $timenow;
+            try {
+                $DB->insert_record_raw('user_lastaccess', $last, false);
+            } catch (dml_write_exception $e) {
+                // During a race condition we can fail to find the data, then it appears.
+                // If we still can't find it, rethrow the exception.
+                $lastaccess = $DB->get_field('user_lastaccess', 'timeaccess', array('userid' => $USER->id,
+                                                                                    'courseid' => $courseid));
+                if ($lastaccess === false) {
+                    throw $e;
+                }
+                // If we did find it, the race condition was true and another thread has inserted the time for us.
+                // We can just continue without having to do anything.
+            }
+
+        } else if ($timenow - $lastaccess <  LASTACCESS_UPDATE_SECS) {
+            // no need to update now, it was updated recently in concurrent login ;-)
+
+        } else {
+            // Update course lastaccess for next checks
+            $USER->currentcourseaccess[$courseid] = $timenow;
+
+            $DB->set_field('user_lastaccess', 'timeaccess', $timenow, array('userid'=>$USER->id, 'courseid'=>$courseid));
         }
-
-        if (isteacher($courseid, false, false)) {
-            $db->Execute("UPDATE {$CFG->prefix}user_teachers SET timeaccess = '$timenow' ".
-                         "WHERE course = '$courseid' AND userid = '$userid'");
-        }
-    }     
-}
-
-
-/**
-* select all log records based on SQL criteria
-* 
-* select all log records based on SQL criteria
-* 
-* @param    string  $select SQL select criteria
-* @param    string  $order  SQL order by clause to sort the records returned
-*/
-function get_logs($select, $order="l.time DESC", $limitfrom="", $limitnum="", &$totalcount) {
-    global $CFG;
-
-    if ($limitfrom !== "") {
-        switch ($CFG->dbtype) {
-            case "mysql":
-                 $limit = "LIMIT $limitfrom,$limitnum";
-                 break;
-            case "postgres7":
-                 $limit = "LIMIT $limitnum OFFSET $limitfrom";
-                 break;
-            default: 
-                 $limit = "LIMIT $limitnum,$limitfrom";
-        }
-    } else {
-        $limit = "";
     }
-
-    if ($order) {
-        $order = "ORDER BY $order";
-    }
-
-    $selectsql = "{$CFG->prefix}log l, {$CFG->prefix}user u WHERE $select";
-
-    $totalcount = count_records_sql("SELECT COUNT(*) FROM $selectsql");
-
-    return get_records_sql("SELECT l.*, u.firstname, u.lastname, u.picture 
-                                FROM $selectsql $order $limit"); 
-}
-
-
-/**
-* select all log records for a given course and user
-* 
-* select all log records for a given course and user
-*
-* @param    type description
-*/
-function get_logs_usercourse($userid, $courseid, $coursestart) {
-    global $CFG;
-
-    if ($courseid) {
-       $courseselect = " AND course = '$courseid' ";
-    }
-
-    return get_records_sql("SELECT floor((`time` - $coursestart)/86400) as day, count(*) as num 
-                            FROM {$CFG->prefix}log 
-                           WHERE userid = '$userid' 
-                             AND `time` > '$coursestart' $courseselect
-                        GROUP BY day ");
-}
-
-/**
-* select all log records for a given course, user, and day
-* 
-* select all log records for a given course, user, and day
-*
-* @param    type description
-*/
-function get_logs_userday($userid, $courseid, $daystart) {
-    global $CFG;
-
-    if ($courseid) {
-       $courseselect = " AND course = '$courseid' ";
-    }
-
-    return get_records_sql("SELECT floor((`time` - $daystart)/3600) as hour, count(*) as num
-                            FROM {$CFG->prefix}log
-                           WHERE userid = '$userid' 
-                             AND `time` > '$daystart' $courseselect
-                        GROUP BY hour ");
 }
 
 /// GENERAL HELPFUL THINGS  ///////////////////////////////////
 
 /**
-* dump a given object's information in a PRE block
-* 
-* dump a given object's information in a PRE block
-* Mostly just for debugging
-*
-* @param    type description
-*/
+ * Dumps a given object's information for debugging purposes
+ *
+ * When used in a CLI script, the object's information is written to the standard
+ * error output stream. When used in a web script, the object is dumped to a
+ * pre-formatted block with the "notifytiny" CSS class.
+ *
+ * @param mixed $object The data to be printed
+ * @return void output is echo'd
+ */
 function print_object($object) {
 
-    echo "<PRE>";
-    print_r($object);
-    echo "</PRE>";
+    // we may need a lot of memory here
+    raise_memory_limit(MEMORY_EXTRA);
+
+    if (CLI_SCRIPT) {
+        fwrite(STDERR, print_r($object, true));
+        fwrite(STDERR, PHP_EOL);
+    } else {
+        echo html_writer::tag('pre', s(print_r($object, true)), array('class' => 'notifytiny'));
+    }
 }
 
+/**
+ * This function is the official hook inside XMLDB stuff to delegate its debug to one
+ * external function.
+ *
+ * Any script can avoid calls to this function by defining XMLDB_SKIP_DEBUG_HOOK before
+ * using XMLDB classes. Obviously, also, if this function doesn't exist, it isn't invoked ;-)
+ *
+ * @uses DEBUG_DEVELOPER
+ * @param string $message string contains the error message
+ * @param object $object object XMLDB object that fired the debug
+ */
+function xmldb_debug($message, $object) {
 
+    debugging($message, DEBUG_DEVELOPER);
+}
 
-// vim:autoindent:expandtab:shiftwidth=4:tabstop=4:tw=140:
-?>
+/**
+ * @global object
+ * @uses CONTEXT_COURSECAT
+ * @return boolean Whether the user can create courses in any category in the system.
+ */
+function user_can_create_courses() {
+    global $DB;
+    $catsrs = $DB->get_recordset('course_categories');
+    foreach ($catsrs as $cat) {
+        if (has_capability('moodle/course:create', context_coursecat::instance($cat->id))) {
+            $catsrs->close();
+            return true;
+        }
+    }
+    $catsrs->close();
+    return false;
+}
+
+/**
+ * This method can update the values in mulitple database rows for a colum with
+ * a unique index, without violating that constraint.
+ *
+ * Suppose we have a table with a unique index on (otherid, sortorder), and
+ * for a particular value of otherid, we want to change all the sort orders.
+ * You have to do this carefully or you will violate the unique index at some time.
+ * This method takes care of the details for you.
+ *
+ * Note that, it is the responsibility of the caller to make sure that the
+ * requested rename is legal. For example, if you ask for [1 => 2, 2 => 2]
+ * then you will get a unique key violation error from the database.
+ *
+ * @param string $table The database table to modify.
+ * @param string $field the field that contains the values we are going to change.
+ * @param array $newvalues oldvalue => newvalue how to change the values.
+ *      E.g. [1 => 4, 2 => 1, 3 => 3, 4 => 2].
+ * @param array $otherconditions array fieldname => requestedvalue extra WHERE clause
+ *      conditions to restrict which rows are affected. E.g. array('otherid' => 123).
+ * @param int $unusedvalue (defaults to -1) a value that is never used in $ordercol.
+ */
+function update_field_with_unique_index($table, $field, array $newvalues,
+        array $otherconditions, $unusedvalue = -1) {
+    global $DB;
+    $safechanges = decompose_update_into_safe_changes($newvalues, $unusedvalue);
+
+    $transaction = $DB->start_delegated_transaction();
+    foreach ($safechanges as $change) {
+        list($from, $to) = $change;
+        $otherconditions[$field] = $from;
+        $DB->set_field($table, $field, $to, $otherconditions);
+    }
+    $transaction->allow_commit();
+}
+
+/**
+ * Helper used by {@link update_field_with_unique_index()}. Given a desired
+ * set of changes, break them down into single udpates that can be done one at
+ * a time without breaking any unique index constraints.
+ *
+ * Suppose the input is array(1 => 2, 2 => 1) and -1. Then the output will be
+ * array (array(1, -1), array(2, 1), array(-1, 2)). This function solves this
+ * problem in the general case, not just for simple swaps. The unit tests give
+ * more examples.
+ *
+ * Note that, it is the responsibility of the caller to make sure that the
+ * requested rename is legal. For example, if you ask for something impossible
+ * like array(1 => 2, 2 => 2) then the results are undefined. (You will probably
+ * get a unique key violation error from the database later.)
+ *
+ * @param array $newvalues The desired re-ordering.
+ *      E.g. array(1 => 4, 2 => 1, 3 => 3, 4 => 2).
+ * @param int $unusedvalue A value that is not currently used.
+ * @return array A safe way to perform the re-order. An array of two-element
+ *      arrays array($from, $to).
+ *      E.g. array(array(1, -1), array(2, 1), array(4, 2), array(-1, 4)).
+ */
+function decompose_update_into_safe_changes(array $newvalues, $unusedvalue) {
+    $nontrivialmap = array();
+    foreach ($newvalues as $from => $to) {
+        if ($from == $unusedvalue || $to == $unusedvalue) {
+            throw new \coding_exception('Supposedly unused value ' . $unusedvalue . ' is actually used!');
+        }
+        if ($from != $to) {
+            $nontrivialmap[$from] = $to;
+        }
+    }
+
+    if (empty($nontrivialmap)) {
+        return array();
+    }
+
+    // First we deal with all renames that are not part of cycles.
+    // This bit is O(n^2) and it ought to be possible to do better,
+    // but it does not seem worth the effort.
+    $safechanges = array();
+    $nontrivialmapchanged = true;
+    while ($nontrivialmapchanged) {
+        $nontrivialmapchanged = false;
+
+        foreach ($nontrivialmap as $from => $to) {
+            if (array_key_exists($to, $nontrivialmap)) {
+                continue; // Cannot currenly do this rename.
+            }
+            // Is safe to do this rename now.
+            $safechanges[] = array($from, $to);
+            unset($nontrivialmap[$from]);
+            $nontrivialmapchanged = true;
+        }
+    }
+
+    // Are we done?
+    if (empty($nontrivialmap)) {
+        return $safechanges;
+    }
+
+    // Now what is left in $nontrivialmap must be a permutation,
+    // which must be a combination of disjoint cycles. We need to break them.
+    while (!empty($nontrivialmap)) {
+        // Extract the first cycle.
+        reset($nontrivialmap);
+        $current = $cyclestart = key($nontrivialmap);
+        $cycle = array();
+        do {
+            $cycle[] = $current;
+            $next = $nontrivialmap[$current];
+            unset($nontrivialmap[$current]);
+            $current = $next;
+        } while ($current != $cyclestart);
+
+        // Now convert it to a sequence of safe renames by using a temp.
+        $safechanges[] = array($cyclestart, $unusedvalue);
+        $cycle[0] = $unusedvalue;
+        $to = $cyclestart;
+        while ($from = array_pop($cycle)) {
+            $safechanges[] = array($from, $to);
+            $to = $from;
+        }
+    }
+
+    return $safechanges;
+}

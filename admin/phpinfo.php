@@ -1,34 +1,33 @@
-<?PHP  // $Id$
+<?php
        // phpinfo.php - shows phpinfo for the current server
 
     require_once("../config.php");
+    require_once($CFG->libdir.'/adminlib.php');
 
-    require_login();
+    admin_externalpage_setup('phpinfo');
 
-    if (!isadmin()) {
-        error("Only the admin can use this page");
-    }
+    echo $OUTPUT->header();
 
-    if (isset($topframe)) {
-        $stradministration = get_string("administration");
-        $site = get_site();
-    
-	    print_header("$site->shortname: phpinfo", "$site->fullname", 
-                     "<a target=\"$CFG->framename\" href=\"index.php\">$stradministration</a> -> PHP info");
-        exit;
-    }
+    echo '<div class="phpinfo text-ltr">';
 
-    if (isset($bottomframe)) {
-        phpinfo();
-        exit;
-    }
+    ob_start();
+    phpinfo(INFO_GENERAL + INFO_CONFIGURATION + INFO_MODULES + INFO_VARIABLES);
+    $html = ob_get_contents();
+    ob_end_clean();
 
-?>
-<head>
-<title>PHP info</title>
-</head>
+/// Delete styles from output
+    $html = preg_replace('#(\n?<style[^>]*?>.*?</style[^>]*?>)|(\n?<style[^>]*?/>)#is', '', $html);
+    $html = preg_replace('#(\n?<head[^>]*?>.*?</head[^>]*?>)|(\n?<head[^>]*?/>)#is', '', $html);
+/// Delete DOCTYPE from output
+    $html = preg_replace('/<!DOCTYPE html PUBLIC.*?>/is', '', $html);
+/// Delete body and html tags
+    $html = preg_replace('/<html.*?>.*?<body.*?>/is', '', $html);
+    $html = preg_replace('/<\/body><\/html>/is', '', $html);
 
-<frameset rows="80,*">
-   <frame src="phpinfo.php?topframe=true">
-   <frame src="phpinfo.php?bottomframe=true">
-</frameset>
+    echo $html;
+
+    echo '</div>';
+
+    echo $OUTPUT->footer();
+
+

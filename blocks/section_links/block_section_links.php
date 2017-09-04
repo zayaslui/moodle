@@ -1,83 +1,159 @@
-<?PHP //$Id$
+<?php
+// This file is part of Moodle - http://moodle.org/
+//
+// Moodle is free software: you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// Moodle is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU General Public License for more details.
+//
+// You should have received a copy of the GNU General Public License
+// along with Moodle.  If not, see <http://www.gnu.org/licenses/>.
 
-class CourseBlock_section_links extends MoodleBlock {
+/**
+ * This file contains the main class for the section links block.
+ *
+ * @package    block_section_links
+ * @copyright  Jason Hardin
+ * @license    http://www.gnu.org/copyleft/gpl.html GNU GPL v3 or later
+ */
 
-    function CourseBlock_section_links ($course) {
-        if ($course->format == 'topics') {
-            $this->title = get_string('topics', 'block_section_links');
-        }
-        else if ($course->format == 'weeks') {
-            $this->title = get_string('weeks', 'block_section_links');
-        }
-        else {
-            $this->title = get_string('blockname', 'block_section_links');
-        }
-        $this->content_type = BLOCK_TYPE_TEXT;
-        $this->course = $course;
-        $this->version = 2004052800;
+/**
+ * Section links block class.
+ *
+ * @package    block_section_links
+ * @copyright  Jason Hardin
+ * @license    http://www.gnu.org/copyleft/gpl.html GNU GPL v3 or later
+ */
+class block_section_links extends block_base {
+
+    /**
+     * Initialises the block instance.
+     */
+    public function init() {
+        $this->title = get_string('pluginname', 'block_section_links');
     }
 
-    function applicable_formats() {
-        return (COURSE_FORMAT_WEEKS | COURSE_FORMAT_TOPICS);
+    /**
+     * Returns an array of formats for which this block can be used.
+     *
+     * @return array
+     */
+    public function applicable_formats() {
+        return array(
+            'course-view-weeks' => true,
+            'course-view-topics' => true
+        );
     }
 
-    function get_content() {
-        global $CFG, $USER;
+    /**
+     * Generates the content of the block and returns it.
+     *
+     * If the content has already been generated then the previously generated content is returned.
+     *
+     * @return stdClass
+     */
+    public function get_content() {
 
-        $highlight = 0;
+        // The config should be loaded by now.
+        // If its empty then we will use the global config for the section links block.
+        if (isset($this->config)){
+            $config = $this->config;
+        } else{
+            $config = get_config('block_section_links');
+        }
 
-        if($this->content !== NULL) {
+        if ($this->content !== null) {
             return $this->content;
         }
 
-        if ($this->course->format == 'weeks') {
-            $highlight = ceil((time()-$this->course->startdate)/604800);
-            $linktext = get_string('jumptocurrentweek', 'block_section_links');
-            $sectionname = 'week';
+        $this->content = new stdClass;
+        $this->content->footer = '';
+        $this->content->text   = '';
+
+        if (empty($this->instance)) {
+            return $this->content;
         }
-        else if ($this->course->format == 'topics') {
-            $highlight = $this->course->marker;
-            $linktext = get_string('jumptocurrenttopic', 'block_section_links');
-            $sectionname = 'topic';
+
+        $course = $this->page->course;
+        $courseformat = course_get_format($course);
+        $numsections = $courseformat->get_last_section_number();
+        $context = context_course::instance($course->id);
+
+        // Course format options 'numsections' is required to display the block.
+        if (empty($numsections)) {
+            return $this->content;
         }
-        $inc = 1;
-        if ($this->course->numsections > 22) {
+
+        // Prepare the increment value.
+        if (!empty($config->numsections1) and ($numsections > $config->numsections1)) {
+            $inc = $config->incby1;
+        } else if ($numsections > 22) {
             $inc = 2;
-        }
-        if ($this->course->numsections > 40) {
-            $inc = 5;
-        }
-        $courseid = $this->course->id;
-        if ($display = get_field('course_display', 'display', 'course', $courseid, 'userid', $USER->id)) {
-            $link = "$CFG->wwwroot/course/view.php?id=$courseid&amp;$sectionname=";
         } else {
-            $link = '#';
+            $inc = 1;
         }
-        $text = '<font size=-1>';
-        for ($i = $inc; $i <= $this->course->numsections; $i += $inc) {
-            $isvisible = get_field('course_sections', 'visible', 'course', $this->course->id, 'section', $i);
-            if (!$isvisible and !isteacher($this->course->id)) {
-                continue;
-            }
-            $style = ($isvisible) ? '' : ' class="dimmed"';
-            if ($i == $highlight) {
-                $text .= "<a href=\"$link$i\"$style><b>$i</b></a> ";
-            } else {
-                $text .= "<a href=\"$link$i\"$style>$i</a> ";
-            }
-        }
-        if ($highlight) {
-            $isvisible = get_field('course_sections', 'visible', 'course', $this->course->id, 'section', $highlight);
-            if ($isvisible or isteacher($this->course->id)) {
-                $style = ($isvisible) ? '' : ' class="dimmed"';
-                $text .= "<br><a href=\"$link$highlight\"$style>$linktext</a>";
+        if (!empty($config->numsections2) and ($numsections > $config->numsections2)) {
+            $inc = $config->incby2;
+        } else {
+            if ($numsections > 40) {
+                $inc = 5;
             }
         }
 
-        $this->content = New stdClass;
-        $this->content->footer = '';
-        $this->content->text = $text;
+        // Prepare an array of sections to create links for.
+        $sections = array();
+        $canviewhidden = has_capability('moodle/course:update', $context);
+        $coursesections = $courseformat->get_sections();
+        $coursesectionscount = count($coursesections);
+        $sectiontojumpto = false;
+        for ($i = $inc; $i <= $coursesectionscount; $i += $inc) {
+            if ($i > $numsections || !isset($coursesections[$i])) {
+                continue;
+            }
+            $section = $coursesections[$i];
+            if ($section->section && ($section->visible || $canviewhidden)) {
+                $sections[$i] = (object)array(
+                    'section' => $section->section,
+                    'visible' => $section->visible,
+                    'highlight' => false
+                );
+                if ($courseformat->is_section_current($section)) {
+                    $sections[$i]->highlight = true;
+                    $sectiontojumpto = $section->section;
+                }
+            }
+        }
+
+        if (!empty($sections)) {
+            // Render the sections.
+            $renderer = $this->page->get_renderer('block_section_links');
+            $this->content->text = $renderer->render_section_links($this->page->course, $sections, $sectiontojumpto);
+        }
+
         return $this->content;
     }
+    /**
+     * Returns true if this block has instance config.
+     *
+     * @return bool
+     **/
+    public function instance_allow_config() {
+        return true;
+    }
+
+    /**
+     * Returns true if this block has global config.
+     *
+     * @return bool
+     */
+    public function has_config() {
+        return true;
+    }
 }
-?>
+
+

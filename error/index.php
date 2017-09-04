@@ -1,37 +1,61 @@
-<?PHP // $Id$
+<?php
 
-    require("../config.php");
+    require('../config.php');
+    require_once($CFG->libdir.'/eventslib.php');
 
-    if (isset($text)) {    // form submitted
-        if (!$admin = get_admin() ) {
-            error("Could not find the admin user to mail to!");
+    // Form submitted, do not check referer (original page unknown).
+    if ($form = data_submitted()) {
+        // Only deal with real users.
+        if (!isloggedin()) {
+            redirect($CFG->wwwroot);
         }
 
-        email_to_user($admin, $USER, "Error: $referer -> $requested", "$text");
+        // Send the message and redirect.
+        $eventdata = new \core\message\message();
+        $eventdata->courseid         = SITEID;
+        $eventdata->component        = 'moodle';
+        $eventdata->name             = 'errors';
+        $eventdata->userfrom          = $USER;
+        $eventdata->userto            = core_user::get_support_user();
+        $eventdata->subject           = 'Error: '. $form->referer .' -> '. $form->requested;
+        $eventdata->fullmessage       = $form->text;
+        $eventdata->fullmessageformat = FORMAT_PLAIN;
+        $eventdata->fullmessagehtml   = '';
+        $eventdata->smallmessage      = '';
+        message_send($eventdata);
 
-        redirect("$CFG->wwwroot/course/", "Message sent, thanks", 3);
-        die;
+        redirect($CFG->wwwroot .'/course/', 'Message sent, thanks', 3);
+        exit;
     }
 
     $site = get_site();
-    
-    print_header("$site->fullname:Error", "$site->fullname: Error 404", "", "form.text");
+    $redirecturl = empty($_SERVER['REDIRECT_URL']) ? '' : $_SERVER['REDIRECT_URL'];
+    $httpreferer = get_local_referer(false);
+    $requesturi  = empty($_SERVER['REQUEST_URI'])  ? '' : $_SERVER['REQUEST_URI'];
 
-    print_simple_box("An unusual error occurred (tried to reach a page that doesn't exist).<P align=center>$REDIRECT_URL", "center", "", "$THEME->cellheading");
-  
+    header("HTTP/1.0 404 Not Found");
+    header("Status: 404 Not Found");
+
+    $PAGE->set_url('/error/');
+    $PAGE->set_context(context_system::instance());
+    $PAGE->set_title($site->fullname .':Error');
+    $PAGE->set_heading($site->fullname .': Error 404');
+    $PAGE->navbar->add('Error 404 - File not Found');
+    echo $OUTPUT->header();
+    echo $OUTPUT->box(get_string('pagenotexist', 'error'). '<br />'.s($requesturi), 'generalbox boxaligncenter');
+
+    if (isloggedin()) {
 ?>
-  
-  <CENTER>
-  <P>If you have time, please let us know what you were trying 
-     to do when the error occurred:
-  <P><FORM action="<?php echo $CFG->wwwroot ?>/error/index.php" name=form method=post>
-     <TEXTAREA ROWS=3 COLS=50 NAME=text></TEXTAREA><BR>
-     <INPUT TYPE=hidden NAME=referer VALUE="<?php echo $HTTP_REFERER ?>">
-     <INPUT TYPE=hidden NAME=requested VALUE="<?php echo $REQUEST_URI ?>">
-     <INPUT TYPE=submit VALUE="Send this off">
-     </FORM>
+        <p><?php echo get_string('pleasereport', 'error'); ?>
+        <p><form action="<?php echo $CFG->wwwroot ?>/error/index.php" method="post">
+           <textarea rows="3" cols="50" name="text" id="text" spellcheck="true"></textarea><br />
+           <input type="hidden" name="referer" value="<?php p($httpreferer) ?>">
+           <input type="hidden" name="requested" value="<?php p($requesturi) ?>">
+           <input type="submit" value="<?php echo get_string('sendmessage', 'error'); ?>">
+           </form>
 <?php
-
-  print_footer();
-
+    } else {
+        echo $OUTPUT->continue_button($CFG->wwwroot);
+    }
+    echo $OUTPUT->footer();
 ?>

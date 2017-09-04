@@ -1,101 +1,80 @@
-<?PHP // $Id$
+<?php
       // This function fetches math. images from the data directory
       // If not, it obtains the corresponding TeX expression from the cache_tex db table
       // and uses mimeTeX to create the image file
 
-    $nomoodlecookie = true;     // Because it interferes with caching
+// disable moodle specific debug messages and any errors in output
+define('NO_DEBUG_DISPLAY', true);
+define('NO_MOODLE_COOKIES', true); // Because it interferes with caching
 
-    require_once("../../config.php");
+    require_once('../../config.php');
 
-    $CFG->texfilterdir = "filter/tex";
-    $CFG->teximagedir = "filter/tex";
+    if (!filter_is_enabled('tex')) {
+        print_error('filternotenabled');
+    }
 
-    error_reporting(E_ALL);
+    require_once($CFG->libdir.'/filelib.php');
+    require_once($CFG->dirroot.'/filter/tex/lib.php');
+    require_once($CFG->dirroot.'/filter/tex/latex.php');
 
-    $lifetime = 86400;
-    if (isset($file)) {     // workaround for situations where / syntax doesn't work
-        $pathinfo = '/' . $file;
+    $cmd    = '';               // Initialise these variables
+    $status = '';
+
+    $relativepath = get_file_argument();
+
+    $args = explode('/', trim($relativepath, '/'));
+
+    if (count($args) == 1) {
+        $image    = $args[0];
+        $pathname = $CFG->dataroot.'/filter/tex/'.$image;
     } else {
-        $pathinfo = get_slash_arguments("pix.php");
+        print_error('invalidarguments', 'error');
     }
-
-    if (! $args = parse_slash_arguments($pathinfo)) {
-        error("No valid arguments supplied");
-    }
-
-    $numargs = count($args);
-
-    if ($numargs == 1) {
-        $image  = $args[0];
-        $pathname = "$CFG->dataroot/$CFG->teximagedir/$image";
-        $filetype = "image/gif";
-    } else {
-        error("No valid arguments supplied");
-    }
-
 
     if (!file_exists($pathname)) {
-        $md5 = str_replace('.gif','',$image);
-        if ($texcache = get_record("cache_filters", "filter", "tex", "md5key", $md5)) {
-            if (!file_exists("$CFG->dataroot/$CFG->teximagedir")) {
-                make_upload_directory($CFG->teximagedir);
+        $convertformat = get_config('filter_tex', 'convertformat');
+        if (strpos($image, '.png')) {
+            $convertformat = 'png';
+        }
+        $md5 = str_replace(".{$convertformat}", '', $image);
+        if ($texcache = $DB->get_record('cache_filters', array('filter'=>'tex', 'md5key'=>$md5))) {
+            if (!file_exists($CFG->dataroot.'/filter/tex')) {
+                make_upload_directory('filter/tex');
             }
 
-            $texexp = $texcache->rawtext;
-            $texexp = str_replace('&lt;','<',$texexp);
-            $texexp = str_replace('&gt;','>',$texexp);
-            $texexp = preg_replace('!\r\n?!',' ',$texexp);
-            $texexp = '\Large ' . $texexp;
+            // try and render with latex first
+            $latex = new latex();
+            $density = get_config('filter_tex', 'density');
+            $background = get_config('filter_tex', 'latexbackground');
+            $texexp = $texcache->rawtext; // the entities are now decoded before inserting to DB
+            $lateximage = $latex->render($texexp, $image, 12, $density, $background);
+            if ($lateximage) {
+                copy($lateximage, $pathname);
+                $latex->clean_up($md5);
 
-            if ((PHP_OS == "WINNT") || (PHP_OS == "WIN32") || (PHP_OS == "Windows")) {
-                $texexp = str_replace('"','\"',$texexp);
-                $cmd = "$CFG->dirroot/$CFG->texfilterdir/mimetex.exe";
-                $cmd = str_replace(' ','^ ',$cmd);
-                $cmd .= " ++ -e  \"$pathname\" \"$texexp\"";
-            } else if (is_executable("$CFG->dirroot/$CFG->texfilterdir/mimetex")) {   /// Use the custom binary
-
-                $cmd = "$CFG->dirroot/$CFG->texfilterdir/mimetex -e $pathname ". escapeshellarg($texexp);
-                
-            } else {                                                           /// Auto-detect the right TeX binary
-                switch (PHP_OS) {
-
-                    case "Linux":
-                        $cmd = "\"$CFG->dirroot/$CFG->texfilterdir/mimetex.linux\" -e \"$pathname\" ". escapeshellarg($texexp);
-                    break;
-
-                    case "Darwin":
-                        $cmd = "\"$CFG->dirroot/$CFG->texfilterdir/mimetex.darwin\" -e \"$pathname\" ". escapeshellarg($texexp);
-                    break;
-
-                    default:      /// Nothing was found, so tell them how to fix it.
-                        echo "Make sure you have an appropriate MimeTeX binary here:\n\n"; 
-                        echo "    $CFG->dirroot/$CFG->texfilterdir/mimetex\n\n";
-                        echo "and that it has the right permissions set on it as executable program.\n\n";
-                        echo "You can get the latest binaries for your ".PHP_OS." platform from: \n\n";
-                        echo "    http://moodle.org/download/mimetex/";
-                        exit;
-                    break;
-                }
+            } else {
+                // failing that, use mimetex
+                $texexp = $texcache->rawtext;
+                $texexp = str_replace('&lt;', '<', $texexp);
+                $texexp = str_replace('&gt;', '>', $texexp);
+                $texexp = preg_replace('!\r\n?!', ' ', $texexp);
+                $texexp = '\Large '.$texexp;
+                $cmd = filter_tex_get_cmd($pathname, $texexp);
+                system($cmd, $status);
             }
-            system($cmd, $status);
         }
     }
 
     if (file_exists($pathname)) {
-        $lastmodified = filemtime($pathname);
-        header("Last-Modified: " . gmdate("D, d M Y H:i:s", $lastmodified) . " GMT");
-        header("Expires: " . gmdate("D, d M Y H:i:s", time() + $lifetime) . " GMT");
-        header("Cache-control: max_age = $lifetime"); // a day
-        header("Pragma: ");
-        header("Content-disposition: inline; filename=$image");
-        header("Content-length: ".filesize($pathname));
-        header("Content-type: $filetype");
-        readfile("$pathname");
+        send_file($pathname, $image);
     } else {
-        echo "The shell command<br>$cmd<br>returned status = $status<br>\n";
-        echo "Image not found!<br>";
-        echo "Please try the <a href=\"$CFG->wwwroot/$CFG->texfilterdir/texdebug.php\">debugging script</a>";
+        if (debugging()) {
+            echo "The shell command<br />$cmd<br />returned status = $status<br />\n";
+            echo "Image not found!<br />";
+            echo "Please try the <a href=\"$CFG->wwwroot/filter/tex/texdebug.php\">debugging script</a>";
+        } else {
+            echo "Image not found!<br />";
+            echo "Please try the <a href=\"$CFG->wwwroot/filter/tex/texdebug.php\">debugging script</a><br />";
+            echo "Please turn on debug mode in site configuration to see more info here.";
+        }
     }
-
-    exit;
-?>

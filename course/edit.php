@@ -1,232 +1,244 @@
-<?PHP // $Id$
-      // Edit course settings
+<?php
+// This file is part of Moodle - http://moodle.org/
+//
+// Moodle is free software: you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// Moodle is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU General Public License for more details.
+//
+// You should have received a copy of the GNU General Public License
+// along with Moodle.  If not, see <http://www.gnu.org/licenses/>.
 
-	require_once("../config.php");
-	require_once("lib.php");
-        require_once("$CFG->libdir/blocklib.php");
+/**
+ * Edit course settings
+ *
+ * @package    core_course
+ * @copyright  1999 onwards Martin Dougiamas (http://dougiamas.com)
+ * @license    http://www.gnu.org/copyleft/gpl.html GNU GPL v3 or later
+ */
 
-    optional_variable($id, 0);   // course id
-    optional_variable($category, 0);   // category id
+require_once('../config.php');
+require_once('lib.php');
+require_once('edit_form.php');
 
-    require_login();
+$id = optional_param('id', 0, PARAM_INT); // Course id.
+$categoryid = optional_param('category', 0, PARAM_INT); // Course category - can be changed in edit form.
+$returnto = optional_param('returnto', 0, PARAM_ALPHANUM); // Generic navigation return page switch.
+$returnurl = optional_param('returnurl', '', PARAM_LOCALURL); // A return URL. returnto must also be set to 'url'.
 
-    if ($id) {
-        if (! $course = get_record("course", "id", $id)) {
-            error("Course ID was incorrect");
-        }
-
-        if (!isteacheredit($course->id)) {
-            error("You do not currently have editing privileges!");
-        }
-    } else {  // Admin is creating a new course
-
-        if (!iscreator()) {
-            error("You do not currently have course creation privileges!");
-        }
-
-        $course = NULL;
-    }
-
-    if (! $site = get_site()) {
-        redirect("$CFG->wwwroot/$CFG->admin/index.php");
-    }
-
-
-
-
-/// If data submitted, then process and store.
-
-	if ($form = data_submitted()) {
-
-        check_for_restricted_user($USER->username, "$CFG->wwwroot/course/view.php?id=$course->id");
-
-        $form->startdate = make_timestamp($form->startyear, $form->startmonth, $form->startday);
-
-        validate_form($course, $form, $err);
-
-        if (count($err) == 0) {
-
-            $form->timemodified = time();
-
-            if (!empty($course)) {
-                if (update_record("course", $form)) {
-                    add_to_log($course->id, "course", "update", "edit.php?id=$id", "");
-                    fix_course_sortorder($form->category);
-		            redirect("view.php?id=$course->id", get_string("changessaved"));
-                } else {
-                    error("Serious Error! Could not update the course record! (id = $form->id)");
-                }
-            } else {
-                $form->timecreated = time();
-
-                //Create blockinfo default content
-                if ($form->format == "social") {
-                    $form->blockinfo = blocks_get_default_blocks (NULL,"participants,search_forums,calendar_month,calendar_upcoming,social_activities,recent_activity,admin,course_list");
-                } else {
-                    //For topics and weeks formats (default built in the function)
-                    $form->blockinfo = blocks_get_default_blocks();
-                }
-
-                if ($newcourseid = insert_record("course", $form)) {  // Set up new course
-                    $section = NULL;
-                    $section->course = $newcourseid;   // Create a default section.
-                    $section->section = 0;
-                    $section->id = insert_record("course_sections", $section);
-
-                    fix_course_sortorder($form->category);
-                    add_to_log($newcourseid, "course", "new", "view.php?id=$newcourseid", "");
-
-                    if (isadmin()) { // Redirect admin to add teachers
-                        redirect("teacher.php?id=$newcourseid", get_string("changessaved"));
-
-                    } else {         // Add current teacher and send to course
-
-                        $newteacher = NULL;
-                        $newteacher->userid = $USER->id;
-                        $newteacher->course = $newcourseid;
-                        $newteacher->authority = 1;   // First teacher is the main teacher
-                        $newteacher->editall = 1;     // Course creator can edit their own course
-
-                        if (!$newteacher->id = insert_record("user_teachers", $newteacher)) {
-                            error("Could not add you to this new course!");
-                        }
-
-                        $USER->teacher[$newcourseid] = true;
-                        $USER->teacheredit[$newcourseid] = true;
-
-                        redirect("view.php?id=$newcourseid", get_string("changessaved"));
-                    }
-
-                } else {
-                    error("Serious Error! Could not create the new course!");
-                }
-            }
-		    die;
-        } else {
-            foreach ($err as $key => $value) {
-                $focus = "form.$key";
-            }
-
-        }
-	}
-
-/// Otherwise fill and print the form.
-
-    if (empty($form)) {
-        if (!empty($course)) {
-            $form = $course;
-        } else {
-            $form->startdate = time() + 3600 * 24;
-            $form->fullname = get_string("defaultcoursefullname");
-            $form->shortname = get_string("defaultcourseshortname");
-            $form->summary = get_string("defaultcoursesummary");
-            $form->format = "weeks";
-            $form->password = "";
-            $form->guest = 0;
-            $form->numsections = 10;
-            $form->newsitems = 5;
-            $form->showgrades = 1;
-            $form->groupmode = 0;
-            $form->groupmodeforce = 0;
-            $form->category = $category;
-            $form->id = "";
-            $form->visible = 1;
-
-            if (current_language() == $CFG->lang) {
-                $form->teacher  = $site->teacher;
-                $form->teachers = $site->teachers;
-                $form->student  = $site->student;
-                $form->students = $site->students;
-            } else {
-                $form->teacher = get_string("defaultcourseteacher");
-                $form->teachers = get_string("defaultcourseteachers");
-                $form->student = get_string("defaultcoursestudent");
-                $form->students = get_string("defaultcoursestudents");
-            }
-        }
-    }
-
-    if (empty($focus)) {
-        $focus = "";
-    }
-
-    $form->categories = get_records_select_menu("course_categories", "", "name", "id,name");
-
-    $courseformats = get_list_of_plugins("course/format");
-    $form->courseformats = array();
-
-    foreach ($courseformats as $courseformat) {
-        $form->courseformats["$courseformat"] = get_string("format$courseformat");
-    }
-
-    $usehtmleditor = can_use_html_editor();
-
-    $streditcoursesettings = get_string("editcoursesettings");
-    $straddnewcourse = get_string("addnewcourse");
-    $stradministration = get_string("administration");
-    $strcategories = get_string("categories");
-
-    if (!empty($course)) {
-	    print_header($streditcoursesettings, "$course->fullname",
-                     "<a href=\"$CFG->wwwroot/course/view.php?id=$course->id\">$course->shortname</a>
-                      -> $streditcoursesettings", $focus);
+if ($returnto === 'url' && confirm_sesskey() && $returnurl) {
+    // If returnto is 'url' then $returnurl may be used as the destination to return to after saving or cancelling.
+    // Sesskey must be specified, and would be set by the form anyway.
+    $returnurl = new moodle_url($returnurl);
+} else {
+    if (!empty($id)) {
+        $returnurl = new moodle_url($CFG->wwwroot . '/course/view.php', array('id' => $id));
     } else {
-        print_header("$site->shortname: $straddnewcourse", "$site->fullname",
-                     "<a href=\"../$CFG->admin/index.php\">$stradministration</a> -> ".
-                     "<a href=\"index.php\">$strcategories</a> -> $straddnewcourse", $focus);
+        $returnurl = new moodle_url($CFG->wwwroot . '/course/');
     }
-
-    print_heading($streditcoursesettings);
-    print_simple_box_start("center", "", "$THEME->cellheading");
-	include("edit.html");
-    print_simple_box_end();
-
-    print_footer($course);
-
-    if ($usehtmleditor) {
-        use_html_editor("summary");
-    }
-
-    exit;
-
-/// Functions /////////////////////////////////////////////////////////////////
-
-function validate_form($course, &$form, &$err) {
-
-    if (empty($form->fullname))
-        $err["fullname"] = get_string("missingfullname");
-
-    if (empty($form->shortname))
-        $err["shortname"] = get_string("missingshortname");
-
-    if ($foundcourses = get_records("course", "shortname", $form->shortname)) {
-        if (!empty($course->id)) {
-            unset($foundcourses[$course->id]);
-        }
-        if (!empty($foundcourses)) {
-            foreach ($foundcourses as $foundcourse) {
-                $foundcoursenames[] = $foundcourse->fullname;
-            }
-            $foundcoursenamestring = addslashes(implode(',', $foundcoursenames));
-
-            $err["shortname"] = get_string("shortnametaken", "", $foundcoursenamestring);
+    if ($returnto !== 0) {
+        switch ($returnto) {
+            case 'category':
+                $returnurl = new moodle_url($CFG->wwwroot . '/course/index.php', array('categoryid' => $categoryid));
+                break;
+            case 'catmanage':
+                $returnurl = new moodle_url($CFG->wwwroot . '/course/management.php', array('categoryid' => $categoryid));
+                break;
+            case 'topcatmanage':
+                $returnurl = new moodle_url($CFG->wwwroot . '/course/management.php');
+                break;
+            case 'topcat':
+                $returnurl = new moodle_url($CFG->wwwroot . '/course/');
+                break;
+            case 'pending':
+                $returnurl = new moodle_url($CFG->wwwroot . '/course/pending.php');
+                break;
         }
     }
-
-    if (empty($form->summary))
-        $err["summary"] = get_string("missingsummary");
-
-    if (empty($form->teacher))
-        $err["teacher"] = get_string("missingteacher");
-
-    if (empty($form->student))
-        $err["student"] = get_string("missingstudent");
-
-    if (! $form->category)
-        $err["category"] = get_string("missingcategory");
-
-    return;
 }
 
+$PAGE->set_pagelayout('admin');
+if ($id) {
+    $pageparams = array('id' => $id);
+} else {
+    $pageparams = array('category' => $categoryid);
+}
+if ($returnto !== 0) {
+    $pageparams['returnto'] = $returnto;
+    if ($returnto === 'url' && $returnurl) {
+        $pageparams['returnurl'] = $returnurl;
+    }
+}
+$PAGE->set_url('/course/edit.php', $pageparams);
 
-?>
+// Basic access control checks.
+if ($id) {
+    // Editing course.
+    if ($id == SITEID){
+        // Don't allow editing of  'site course' using this from.
+        print_error('cannoteditsiteform');
+    }
+
+    // Login to the course and retrieve also all fields defined by course format.
+    $course = get_course($id);
+    require_login($course);
+    $course = course_get_format($course)->get_course();
+
+    $category = $DB->get_record('course_categories', array('id'=>$course->category), '*', MUST_EXIST);
+    $coursecontext = context_course::instance($course->id);
+    require_capability('moodle/course:update', $coursecontext);
+
+} else if ($categoryid) {
+    // Creating new course in this category.
+    $course = null;
+    require_login();
+    $category = $DB->get_record('course_categories', array('id'=>$categoryid), '*', MUST_EXIST);
+    $catcontext = context_coursecat::instance($category->id);
+    require_capability('moodle/course:create', $catcontext);
+    $PAGE->set_context($catcontext);
+
+} else {
+    require_login();
+    print_error('needcoursecategroyid');
+}
+
+// Prepare course and the editor.
+$editoroptions = array('maxfiles' => EDITOR_UNLIMITED_FILES, 'maxbytes'=>$CFG->maxbytes, 'trusttext'=>false, 'noclean'=>true);
+$overviewfilesoptions = course_overviewfiles_options($course);
+if (!empty($course)) {
+    // Add context for editor.
+    $editoroptions['context'] = $coursecontext;
+    $editoroptions['subdirs'] = file_area_contains_subdirs($coursecontext, 'course', 'summary', 0);
+    $course = file_prepare_standard_editor($course, 'summary', $editoroptions, $coursecontext, 'course', 'summary', 0);
+    if ($overviewfilesoptions) {
+        file_prepare_standard_filemanager($course, 'overviewfiles', $overviewfilesoptions, $coursecontext, 'course', 'overviewfiles', 0);
+    }
+
+    // Inject current aliases.
+    $aliases = $DB->get_records('role_names', array('contextid'=>$coursecontext->id));
+    foreach($aliases as $alias) {
+        $course->{'role_'.$alias->roleid} = $alias->name;
+    }
+
+    // Populate course tags.
+    $course->tags = core_tag_tag::get_item_tags_array('core', 'course', $course->id);
+
+} else {
+    // Editor should respect category context if course context is not set.
+    $editoroptions['context'] = $catcontext;
+    $editoroptions['subdirs'] = 0;
+    $course = file_prepare_standard_editor($course, 'summary', $editoroptions, null, 'course', 'summary', null);
+    if ($overviewfilesoptions) {
+        file_prepare_standard_filemanager($course, 'overviewfiles', $overviewfilesoptions, null, 'course', 'overviewfiles', 0);
+    }
+}
+
+// First create the form.
+$args = array(
+    'course' => $course,
+    'category' => $category,
+    'editoroptions' => $editoroptions,
+    'returnto' => $returnto,
+    'returnurl' => $returnurl
+);
+$editform = new course_edit_form(null, $args);
+if ($editform->is_cancelled()) {
+    // The form has been cancelled, take them back to what ever the return to is.
+    redirect($returnurl);
+} else if ($data = $editform->get_data()) {
+    // Process data if submitted.
+    if (empty($course->id)) {
+        // In creating the course.
+        $course = create_course($data, $editoroptions);
+
+        // Get the context of the newly created course.
+        $context = context_course::instance($course->id, MUST_EXIST);
+
+        if (!empty($CFG->creatornewroleid) and !is_viewing($context, NULL, 'moodle/role:assign') and !is_enrolled($context, NULL, 'moodle/role:assign')) {
+            // Deal with course creators - enrol them internally with default role.
+            enrol_try_internal_enrol($course->id, $USER->id, $CFG->creatornewroleid);
+        }
+
+        // The URL to take them to if they chose save and display.
+        $courseurl = new moodle_url('/course/view.php', array('id' => $course->id));
+
+        // If they choose to save and display, and they are not enrolled take them to the enrolments page instead.
+        if (!is_enrolled($context) && isset($data->saveanddisplay)) {
+            // Redirect to manual enrolment page if possible.
+            $instances = enrol_get_instances($course->id, true);
+            foreach($instances as $instance) {
+                if ($plugin = enrol_get_plugin($instance->enrol)) {
+                    if ($plugin->get_manual_enrol_link($instance)) {
+                        // We know that the ajax enrol UI will have an option to enrol.
+                        $courseurl = new moodle_url('/enrol/users.php', array('id' => $course->id, 'newcourse' => 1));
+                        break;
+                    }
+                }
+            }
+        }
+    } else {
+        // Save any changes to the files used in the editor.
+        update_course($data, $editoroptions);
+        // Set the URL to take them too if they choose save and display.
+        $courseurl = new moodle_url('/course/view.php', array('id' => $course->id));
+    }
+
+    if (isset($data->saveanddisplay)) {
+        // Redirect user to newly created/updated course.
+        redirect($courseurl);
+    } else {
+        // Save and return. Take them back to wherever.
+        redirect($returnurl);
+    }
+}
+
+// Print the form.
+
+$site = get_site();
+
+$streditcoursesettings = get_string("editcoursesettings");
+$straddnewcourse = get_string("addnewcourse");
+$stradministration = get_string("administration");
+$strcategories = get_string("categories");
+
+if (!empty($course->id)) {
+    // Navigation note: The user is editing a course, the course will exist within the navigation and settings.
+    // The navigation will automatically find the Edit settings page under course navigation.
+    $pagedesc = $streditcoursesettings;
+    $title = $streditcoursesettings;
+    $fullname = $course->fullname;
+} else {
+    // The user is adding a course, this page isn't presented in the site navigation/admin.
+    // Adding a new course is part of course category management territory.
+    // We'd prefer to use the management interface URL without args.
+    $managementurl = new moodle_url('/course/management.php');
+    // These are the caps required in order to see the management interface.
+    $managementcaps = array('moodle/category:manage', 'moodle/course:create');
+    if ($categoryid && !has_any_capability($managementcaps, context_system::instance())) {
+        // If the user doesn't have either manage caps then they can only manage within the given category.
+        $managementurl->param('categoryid', $categoryid);
+    }
+    // Because the course category management interfaces are buried in the admin tree and that is loaded by ajax
+    // we need to manually tell the navigation we need it loaded. The second arg does this.
+    navigation_node::override_active_url($managementurl, true);
+
+    $pagedesc = $straddnewcourse;
+    $title = "$site->shortname: $straddnewcourse";
+    $fullname = $site->fullname;
+    $PAGE->navbar->add($pagedesc);
+}
+
+$PAGE->set_title($title);
+$PAGE->set_heading($fullname);
+
+echo $OUTPUT->header();
+echo $OUTPUT->heading($pagedesc);
+
+$editform->display();
+
+echo $OUTPUT->footer();

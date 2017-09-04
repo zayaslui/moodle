@@ -1,264 +1,331 @@
-<?PHP // $Id$
+<?php
+// This file is part of Moodle - http://moodle.org/
+//
+// Moodle is free software: you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// Moodle is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU General Public License for more details.
+//
+// You should have received a copy of the GNU General Public License
+// along with Moodle.  If not, see <http://www.gnu.org/licenses/>.
 
-    require_once("../config.php");
-    require_once("$CFG->libdir/gdlib.php");
+/**
+ * Allows you to edit a users profile
+ *
+ * @copyright 1999 Martin Dougiamas  http://dougiamas.com
+ * @license http://www.gnu.org/copyleft/gpl.html GNU GPL v3 or later
+ * @package core_user
+ */
 
-    require_variable($id);       // user id
-    require_variable($course);   // course id
+require_once('../config.php');
+require_once($CFG->libdir.'/gdlib.php');
+require_once($CFG->dirroot.'/user/edit_form.php');
+require_once($CFG->dirroot.'/user/editlib.php');
+require_once($CFG->dirroot.'/user/profile/lib.php');
+require_once($CFG->dirroot.'/user/lib.php');
 
-    if (! $user = get_record("user", "id", $id)) {
-        error("User ID was incorrect");
-    }
+// HTTPS is required in this page when $CFG->loginhttps enabled.
+$PAGE->https_required();
 
-    if (! $course = get_record("course", "id", $course)) {
-        error("Course ID was incorrect");
-    }
+$userid = optional_param('id', $USER->id, PARAM_INT);    // User id.
+$course = optional_param('course', SITEID, PARAM_INT);   // Course id (defaults to Site).
+$returnto = optional_param('returnto', null, PARAM_ALPHA);  // Code determining where to return to after save.
+$cancelemailchange = optional_param('cancelemailchange', 0, PARAM_INT);   // Course id (defaults to Site).
 
-    if ($user->confirmed and user_not_fully_set_up($user)) {
-        // Special case which can only occur when a new account 
-        // has just been created by EXTERNAL authentication
-        // This is the only page in Moodle that has the exception
-        // so that users can set up their accounts
-        $newaccount  = true;
+$PAGE->set_url('/user/edit.php', array('course' => $course, 'id' => $userid));
 
-        if (empty($USER)) {
-            error("Sessions don't seem to be working on this server!");
-        }
-
-    } else {
-        $newaccount  = false;
-        require_login($course->id);
-    }
-
-    if ($USER->id <> $user->id and !isadmin()) {
-        error("You can only edit your own information");
-    }
-
-    if (isguest()) {
-        error("The guest user cannot edit their profile.");
-    }
-
-    if (isguest($user->id)) {
-        error("Sorry, the guest user cannot be edited.");
-    }
-
-
-/// If data submitted, then process and store.
-
-    if ($usernew = data_submitted()) {
-
-        if (isset($USER->username)) {
-            check_for_restricted_user($USER->username, "$CFG->wwwroot/course/view.php?id=$course->id");
-        }
-
-        foreach ($usernew as $key => $data) {
-            $usernew->$key = clean_text($usernew->$key, FORMAT_MOODLE);
-        }
-
-        $usernew->firstname = trim(strip_tags($usernew->firstname));
-        $usernew->lastname  = trim(strip_tags($usernew->lastname));
-
-        if (isset($usernew->username)) {
-            $usernew->username = trim(moodle_strtolower($usernew->username));
-        }
-
-        if (empty($_FILES['imagefile'])) {
-            $_FILES['imagefile'] = NULL;    // To avoid using uninitialised variable later
-        }
-
-        if (find_form_errors($user, $usernew, $err)) {
-            if ($filename = valid_uploaded_file($_FILES['imagefile'])) { 
-                $usernew->picture = save_profile_image($user->id, $filename);
-                set_field('user', 'picture', $usernew->picture, 'id', $user->id);  /// Note picture in DB
-            } else {
-                if (!empty($usernew->deletepicture)) {
-                    set_field('user', 'picture', 0, 'id', $user->id);  /// Delete picture
-                    $usernew->picture = 0;
-                }
-            }
-
-            $user = $usernew;
-
-        } else {
-            $timenow = time();
-
-            if ($filename = valid_uploaded_file($_FILES['imagefile'])) { 
-                $usernew->picture = save_profile_image($user->id, $filename);
-            } else {
-                if (!empty($usernew->deletepicture)) {
-                    set_field('user', 'picture', 0, 'id', $user->id);  /// Delete picture
-                    $usernew->picture = 0;
-                } else {
-                    $usernew->picture = $user->picture;
-                }
-            }
-    
-            $usernew->timemodified = time();
-
-            if (isadmin()) {
-                if (!empty($usernew->newpassword)) {
-                    $usernew->password = md5($usernew->newpassword);
-                }
-            } else {
-                if (isset($usernew->newpassword)) {
-                    error("You can not change the password like that");
-                }
-            }
-            if ($usernew->url and !(substr($usernew->url, 0, 4) == "http")) {
-                $usernew->url = "http://".$usernew->url;
-            }
-
-            if (update_record("user", $usernew)) {
-                add_to_log($course->id, "user", "update", "view.php?id=$user->id&course=$course->id", "");
-
-                if ($user->id == $USER->id) {
-                    // Copy data into $USER session variable
-                    $usernew = (array)$usernew;
-                    foreach ($usernew as $variable => $value) {
-                        $USER->$variable = stripslashes($value);
-                    }
-                    if (isset($USER->newadminuser)) {
-                        unset($USER->newadminuser);
-                        redirect("$CFG->wwwroot/", get_string("changessaved"));
-                    }
-                    redirect("$CFG->wwwroot/user/view.php?id=$user->id&course=$course->id", get_string("changessaved"));
-                } else {
-                    redirect("$CFG->wwwroot/$CFG->admin/user.php", get_string("changessaved"));
-                }
-            } else {
-                error("Could not update the user record ($user->id)");
-            }
-        }
-    }
-    
-/// Otherwise fill and print the form.
-
-    $streditmyprofile = get_string("editmyprofile");
-    $strparticipants = get_string("participants");
-    $strnewuser = get_string("newuser");
-
-    if (($user->firstname and $user->lastname) or $newaccount) {
-        if ($newaccount) {
-            $userfullname = $strnewuser;
-        } else {
-            $userfullname = fullname($user, isteacher($course->id));
-        }
-        if ($course->category) {
-            print_header("$course->shortname: $streditmyprofile", "$course->fullname: $streditmyprofile",
-                        "<A HREF=\"$CFG->wwwroot/course/view.php?id=$course->id\">$course->shortname</A> 
-                        -> <A HREF=\"index.php?id=$course->id\">$strparticipants</A>
-                        -> <A HREF=\"view.php?id=$user->id&course=$course->id\">$userfullname</A> 
-                        -> $streditmyprofile", "");
-        } else {
-            if (isset($USER->newadminuser)) {
-                print_header();
-            } else {
-                print_header("$course->shortname: $streditmyprofile", "$course->fullname",
-                             "<A HREF=\"view.php?id=$user->id&course=$course->id\">$userfullname</A> 
-                              -> $streditmyprofile", "");
-            }
-        }
-    } else {
-        $userfullname = $strnewuser;
-        $straddnewuser = get_string("addnewuser");
-
-        $stradministration = get_string("administration");
-        print_header("$course->shortname: $streditmyprofile", "$course->fullname",
-                     "<a href=\"$CFG->wwwroot/$CFG->admin/\">$stradministration</a> -> ".
-                     "<a href=\"$CFG->wwwroot/$CFG->admin/users.php\">$strusers</a> -> $straddnewuser", "");
-    }
-
-    $teacher = strtolower($course->teacher);
-    if (!isadmin()) {
-        $teacheronly = "(".get_string("teacheronly", "", $teacher).")";
-    } else {
-        $teacheronly = "";
-    }
-
-    print_heading( get_string("userprofilefor", "", "$userfullname") );
-
-    if (isset($USER->newadminuser)) {
-        print_simple_box(get_string("configintroadmin"), "center", "50%");
-        echo "<br />";
-    }
-
-    print_simple_box_start("center", "", "$THEME->cellheading");
-    if (!empty($err)) {
-       echo "<CENTER>";
-       notify(get_string("someerrorswerefound"));
-       echo "</CENTER>";
-    }
-    include("edit.html");
-    print_simple_box_end();
-
-    if (!isset($USER->newadminuser)) {
-        print_footer($course);
-    }
-
-    exit;
-
-
-
-/// FUNCTIONS ////////////////////
-
-function find_form_errors(&$user, &$usernew, &$err) {
-    global $CFG;
-
-    if (isadmin()) {
-        if (empty($usernew->username)) {
-            $err["username"] = get_string("missingusername");
-
-        } else if (record_exists("user", "username", $usernew->username) and $user->username == "changeme") {
-                $err["username"] = get_string("usernameexists");
-
-        } else {
-            if (empty($CFG->extendedusernamechars)) {
-                $string = eregi_replace("[^(-\.[:alnum:])]", "", $usernew->username);
-                if (strcmp($usernew->username, $string)) {
-                    $err["username"] = get_string("alphanumerical");
-                }
-            }
-        }
-
-        if (empty($usernew->newpassword) and empty($user->password) and is_internal_auth() )
-            $err["newpassword"] = get_string("missingpassword");
-
-        if (($usernew->newpassword == "admin") or ($user->password == md5("admin") and empty($usernew->newpassword)) ) {
-            $err["newpassword"] = get_string("unsafepassword");
-        }
-    }
-
-    if (empty($usernew->email))
-        $err["email"] = get_string("missingemail");
-
-    if (empty($usernew->description))
-        $err["description"] = get_string("missingdescription");
-
-    if (empty($usernew->city))
-        $err["city"] = get_string("missingcity");
-
-    if (empty($usernew->firstname))
-        $err["firstname"] = get_string("missingfirstname");
-
-    if (empty($usernew->lastname))
-        $err["lastname"] = get_string("missinglastname");
-
-    if (empty($usernew->country))
-        $err["country"] = get_string("missingcountry");
-
-    if (! validate_email($usernew->email))
-        $err["email"] = get_string("invalidemail");
-
-    else if ($otheruser = get_record("user", "email", $usernew->email)) {
-        if ($otheruser->id <> $user->id) {
-            $err["email"] = get_string("emailexists");
-        }
-    }
-
-    $user->email = $usernew->email;
-
-    return count($err);
+if (!$course = $DB->get_record('course', array('id' => $course))) {
+    print_error('invalidcourseid');
 }
 
+if ($course->id != SITEID) {
+    require_login($course);
+} else if (!isloggedin()) {
+    if (empty($SESSION->wantsurl)) {
+        $SESSION->wantsurl = $CFG->httpswwwroot.'/user/edit.php';
+    }
+    redirect(get_login_url());
+} else {
+    $PAGE->set_context(context_system::instance());
+}
 
-?>
+// Guest can not edit.
+if (isguestuser()) {
+    print_error('guestnoeditprofile');
+}
+
+// The user profile we are editing.
+if (!$user = $DB->get_record('user', array('id' => $userid))) {
+    print_error('invaliduserid');
+}
+
+// Guest can not be edited.
+if (isguestuser($user)) {
+    print_error('guestnoeditprofile');
+}
+
+// User interests separated by commas.
+$user->interests = core_tag_tag::get_item_tags_array('core', 'user', $user->id);
+
+// Remote users cannot be edited. Note we have to perform the strict user_not_fully_set_up() check.
+// Otherwise the remote user could end up in endless loop between user/view.php and here.
+// Required custom fields are not supported in MNet environment anyway.
+if (is_mnet_remote_user($user)) {
+    if (user_not_fully_set_up($user, true)) {
+        $hostwwwroot = $DB->get_field('mnet_host', 'wwwroot', array('id' => $user->mnethostid));
+        print_error('usernotfullysetup', 'mnet', '', $hostwwwroot);
+    }
+    redirect($CFG->wwwroot . "/user/view.php?course={$course->id}");
+}
+
+// Load the appropriate auth plugin.
+$userauth = get_auth_plugin($user->auth);
+
+if (!$userauth->can_edit_profile()) {
+    print_error('noprofileedit', 'auth');
+}
+
+if ($editurl = $userauth->edit_profile_url()) {
+    // This internal script not used.
+    redirect($editurl);
+}
+
+if ($course->id == SITEID) {
+    $coursecontext = context_system::instance();   // SYSTEM context.
+} else {
+    $coursecontext = context_course::instance($course->id);   // Course context.
+}
+$systemcontext   = context_system::instance();
+$personalcontext = context_user::instance($user->id);
+
+// Check access control.
+if ($user->id == $USER->id) {
+    // Editing own profile - require_login() MUST NOT be used here, it would result in infinite loop!
+    if (!has_capability('moodle/user:editownprofile', $systemcontext)) {
+        print_error('cannotedityourprofile');
+    }
+
+} else {
+    // Teachers, parents, etc.
+    require_capability('moodle/user:editprofile', $personalcontext);
+    // No editing of guest user account.
+    if (isguestuser($user->id)) {
+        print_error('guestnoeditprofileother');
+    }
+    // No editing of primary admin!
+    if (is_siteadmin($user) and !is_siteadmin($USER)) {  // Only admins may edit other admins.
+        print_error('useradmineditadmin');
+    }
+}
+
+if ($user->deleted) {
+    echo $OUTPUT->header();
+    echo $OUTPUT->heading(get_string('userdeleted'));
+    echo $OUTPUT->footer();
+    die;
+}
+
+$PAGE->set_pagelayout('admin');
+$PAGE->set_context($personalcontext);
+if ($USER->id != $user->id) {
+    $PAGE->navigation->extend_for_user($user);
+} else {
+    if ($node = $PAGE->navigation->find('myprofile', navigation_node::TYPE_ROOTNODE)) {
+        $node->force_open();
+    }
+}
+
+// Process email change cancellation.
+if ($cancelemailchange) {
+    cancel_email_update($user->id);
+}
+
+// Load user preferences.
+useredit_load_preferences($user);
+
+// Load custom profile fields data.
+profile_load_data($user);
+
+
+// Prepare the editor and create form.
+$editoroptions = array(
+    'maxfiles'   => EDITOR_UNLIMITED_FILES,
+    'maxbytes'   => $CFG->maxbytes,
+    'trusttext'  => false,
+    'forcehttps' => false,
+    'context'    => $personalcontext
+);
+
+$user = file_prepare_standard_editor($user, 'description', $editoroptions, $personalcontext, 'user', 'profile', 0);
+// Prepare filemanager draft area.
+$draftitemid = 0;
+$filemanagercontext = $editoroptions['context'];
+$filemanageroptions = array('maxbytes'       => $CFG->maxbytes,
+                             'subdirs'        => 0,
+                             'maxfiles'       => 1,
+                             'accepted_types' => 'web_image');
+file_prepare_draft_area($draftitemid, $filemanagercontext->id, 'user', 'newicon', 0, $filemanageroptions);
+$user->imagefile = $draftitemid;
+// Create form.
+$userform = new user_edit_form(new moodle_url($PAGE->url, array('returnto' => $returnto)), array(
+    'editoroptions' => $editoroptions,
+    'filemanageroptions' => $filemanageroptions,
+    'user' => $user));
+
+$emailchanged = false;
+
+if ($usernew = $userform->get_data()) {
+
+    // Deciding where to send the user back in most cases.
+    if ($returnto === 'profile') {
+        if ($course->id != SITEID) {
+            $returnurl = new moodle_url('/user/view.php', array('id' => $user->id, 'course' => $course->id));
+        } else {
+            $returnurl = new moodle_url('/user/profile.php', array('id' => $user->id));
+        }
+    } else {
+        $returnurl = new moodle_url('/user/preferences.php', array('userid' => $user->id));
+    }
+
+    $emailchangedhtml = '';
+
+    if ($CFG->emailchangeconfirmation) {
+        // Users with 'moodle/user:update' can change their email address immediately.
+        // Other users require a confirmation email.
+        if (isset($usernew->email) and $user->email != $usernew->email && !has_capability('moodle/user:update', $systemcontext)) {
+            $a = new stdClass();
+            $emailchangedkey = random_string(20);
+            set_user_preference('newemail', $usernew->email, $user->id);
+            set_user_preference('newemailkey', $emailchangedkey, $user->id);
+            set_user_preference('newemailattemptsleft', 3, $user->id);
+
+            $a->newemail = $emailchanged = $usernew->email;
+            $a->oldemail = $usernew->email = $user->email;
+
+            $emailchangedhtml = $OUTPUT->box(get_string('auth_changingemailaddress', 'auth', $a), 'generalbox', 'notice');
+            $emailchangedhtml .= $OUTPUT->continue_button($returnurl);
+        }
+    }
+
+    $authplugin = get_auth_plugin($user->auth);
+
+    $usernew->timemodified = time();
+
+    // Description editor element may not exist!
+    if (isset($usernew->description_editor) && isset($usernew->description_editor['format'])) {
+        $usernew = file_postupdate_standard_editor($usernew, 'description', $editoroptions, $personalcontext, 'user', 'profile', 0);
+    }
+
+    // Pass a true old $user here.
+    if (!$authplugin->user_update($user, $usernew)) {
+        // Auth update failed.
+        print_error('cannotupdateprofile');
+    }
+
+    // Update user with new profile data.
+    user_update_user($usernew, false, false);
+
+    // Update preferences.
+    useredit_update_user_preference($usernew);
+
+    // Update interests.
+    if (isset($usernew->interests)) {
+        useredit_update_interests($usernew, $usernew->interests);
+    }
+
+    // Update user picture.
+    if (empty($CFG->disableuserimages)) {
+        core_user::update_picture($usernew, $filemanageroptions);
+    }
+
+    // Update mail bounces.
+    useredit_update_bounces($user, $usernew);
+
+    // Update forum track preference.
+    useredit_update_trackforums($user, $usernew);
+
+    // Save custom profile fields data.
+    profile_save_data($usernew);
+
+    // Trigger event.
+    \core\event\user_updated::create_from_userid($user->id)->trigger();
+
+    // If email was changed and confirmation is required, send confirmation email now to the new address.
+    if ($emailchanged !== false && $CFG->emailchangeconfirmation) {
+        $tempuser = $DB->get_record('user', array('id' => $user->id), '*', MUST_EXIST);
+        $tempuser->email = $emailchanged;
+
+        $supportuser = core_user::get_support_user();
+
+        $a = new stdClass();
+        $a->url = $CFG->wwwroot . '/user/emailupdate.php?key=' . $emailchangedkey . '&id=' . $user->id;
+        $a->site = format_string($SITE->fullname, true, array('context' => context_course::instance(SITEID)));
+        $a->fullname = fullname($tempuser, true);
+        $a->supportemail = $supportuser->email;
+
+        $emailupdatemessage = get_string('emailupdatemessage', 'auth', $a);
+        $emailupdatetitle = get_string('emailupdatetitle', 'auth', $a);
+
+        // Email confirmation directly rather than using messaging so they will definitely get an email.
+        $noreplyuser = core_user::get_noreply_user();
+        if (!$mailresults = email_to_user($tempuser, $noreplyuser, $emailupdatetitle, $emailupdatemessage)) {
+            die("could not send email!");
+        }
+    }
+
+    // Reload from db, we need new full name on this page if we do not redirect.
+    $user = $DB->get_record('user', array('id' => $user->id), '*', MUST_EXIST);
+
+    if ($USER->id == $user->id) {
+        // Override old $USER session variable if needed.
+        foreach ((array)$user as $variable => $value) {
+            if ($variable === 'description' or $variable === 'password') {
+                // These are not set for security nad perf reasons.
+                continue;
+            }
+            $USER->$variable = $value;
+        }
+        // Preload custom fields.
+        profile_load_custom_fields($USER);
+    }
+
+    if (is_siteadmin() and empty($SITE->shortname)) {
+        // Fresh cli install - we need to finish site settings.
+        redirect(new moodle_url('/admin/index.php'));
+    }
+
+    if (!$emailchanged || !$CFG->emailchangeconfirmation) {
+        redirect($returnurl);
+    }
+}
+
+// Make sure we really are on the https page when https login required.
+$PAGE->verify_https_required();
+
+
+// Display page header.
+$streditmyprofile = get_string('editmyprofile');
+$strparticipants  = get_string('participants');
+$userfullname     = fullname($user, true);
+
+$PAGE->set_title("$course->shortname: $streditmyprofile");
+$PAGE->set_heading($userfullname);
+
+echo $OUTPUT->header();
+echo $OUTPUT->heading($userfullname);
+
+if ($emailchanged) {
+    echo $emailchangedhtml;
+} else {
+    // Finally display THE form.
+    $userform->display();
+}
+
+// And proper footer.
+echo $OUTPUT->footer();
+

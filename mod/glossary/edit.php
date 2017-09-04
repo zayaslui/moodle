@@ -1,278 +1,111 @@
-<?PHP // $Id$
+<?php
 
-require_once("../../config.php");
-require_once("lib.php");
+require_once('../../config.php');
+require_once('lib.php');
+require_once('edit_form.php');
 
-global $CFG, $USER, $THEME;
+$cmid = required_param('cmid', PARAM_INT);            // Course Module ID
+$id   = optional_param('id', 0, PARAM_INT);           // EntryID
 
-require_variable($id);    // Course Module ID
-optional_variable($e);    // EntryID
-optional_variable($confirm,0);    // proceed. Edit the edtry
-
-optional_variable($mode);   // categories if by category?
-optional_variable($hook);    // CategoryID
-
-if (! $cm = get_record("course_modules", "id", $id)) {
-    error("Course Module ID was incorrect");
+if (!$cm = get_coursemodule_from_id('glossary', $cmid)) {
+    print_error('invalidcoursemodule');
 }
 
-if (! $course = get_record("course", "id", $cm->course)) {
-    error("Course is misconfigured");
+if (!$course = $DB->get_record('course', array('id'=>$cm->course))) {
+    print_error('coursemisconf');
 }
 
-require_login($course->id);
+require_login($course, false, $cm);
 
-if ( isguest() ) {
-    error("Guests are not allowed to edit glossaries", $_SERVER["HTTP_REFERER"]);
+$context = context_module::instance($cm->id);
+
+if (!$glossary = $DB->get_record('glossary', array('id'=>$cm->instance))) {
+    print_error('invalidid', 'glossary');
 }
 
-if (! $glossary = get_record("glossary", "id", $cm->instance)) {
-    error("Course module is incorrect");
+$url = new moodle_url('/mod/glossary/edit.php', array('cmid'=>$cm->id));
+if (!empty($id)) {
+    $url->param('id', $id);
 }
-if ( $confirm ) {
-    $form = data_submitted();
-    if ( !isset($form->usedynalink) ) {
-        $form->usedynalink = 0;
-    }
-    if ( !isset($form->casesensitive) ) {
-        $form->casesensitive = 0;
-    }
-    if ( !isset($form->fullmatch) ) {
-        $form->fullmatch = 0;
-    }
-    $timenow = time();
-    $form->text = clean_text($form->text, $form->format);
+$PAGE->set_url($url);
 
-    $newentry->course = $glossary->course;
-    $newentry->glossaryid = $glossary->id;
-
-    $newentry->concept = trim($form->concept);
-    $newentry->definition = $form->text;
-    $newentry->format = $form->format;
-    $newentry->usedynalink = $form->usedynalink;
-    $newentry->casesensitive = $form->casesensitive;
-    $newentry->fullmatch = $form->fullmatch;
-    $newentry->timemodified = $timenow;		
-    $newentry->approved = 0;
-    if ( $glossary->defaultapproval or isteacher($course->id) ) {
-        $newentry->approved = 1;
+if ($id) { // if entry is specified
+    if (isguestuser()) {
+        print_error('guestnoedit', 'glossary', "$CFG->wwwroot/mod/glossary/view.php?id=$cmid");
     }
 
-    if ($form->concept == '' or trim($form->text) == '' ) {
-        $errors = get_string('fillfields','glossary');
-        $strglossary = get_string("modulename", "glossary");
-        $strglossaries = get_string("modulenameplural", "glossary");
-        $stredit = get_string("edit");
+    if (!$entry = $DB->get_record('glossary_entries', array('id'=>$id, 'glossaryid'=>$glossary->id))) {
+        print_error('invalidentry');
+    }
 
-        if ($usehtmleditor = can_use_richtext_editor()) {
-            $defaultformat = FORMAT_HTML;
-            $onsubmit = "onsubmit=\"copyrichtext(form.text);\"";
-        } else {
-            $defaultformat = FORMAT_MOODLE;
-            $onsubmit = "";
+    $ineditperiod = ((time() - $entry->timecreated <  $CFG->maxeditingtime) || $glossary->editalways);
+    if (!has_capability('mod/glossary:manageentries', $context) and !($entry->userid == $USER->id and ($ineditperiod and has_capability('mod/glossary:write', $context)))) {
+        if ($USER->id != $entry->userid) {
+            print_error('errcannoteditothers', 'glossary', "view.php?id=$cm->id&amp;mode=entry&amp;hook=$id");
+        } elseif (!$ineditperiod) {
+            print_error('erredittimeexpired', 'glossary', "view.php?id=$cm->id&amp;mode=entry&amp;hook=$id");
         }
-
-        print_header(strip_tags("$course->shortname: $glossary->name"), "$course->fullname",
-             "<A HREF=\"$CFG->wwwroot/course/view.php?id=$course->id\">$course->shortname</A> -> 
-              <A HREF=\"index.php?id=$course->id\">$strglossaries</A> -> 
-              <A HREF=\"view.php?id=$cm->id\">$glossary->name</A> -> $stredit", "form.text",
-              "", true, "", navmenu($course, $cm));
-
-        print_heading($glossary->name);
-
-        include("edit.html");
-
-        print_footer($course);
-        die;
     }
 
-    if ($e) {
-        $newentry->id = $e;
-    
-        $permissiongranted = 1;
-        if ( !$glossary->allowduplicatedentries ) {
-            if ($dupentries = get_records("glossary_entries","UCASE(concept)", strtoupper($newentry->concept))) {
-                foreach ($dupentries as $curentry) {
-                    if ( $glossary->id == $curentry->glossaryid ) {
-                       if ( $curentry->id != $e ) {
-                          $permissiongranted = 0;
-                           break;
-                       }
-                    }
-                }
-            }
-        }
-    
-        if ( $permissiongranted ) {
-            $newentry->attachment = $_FILES["attachment"];
-            if ($newfilename = glossary_add_attachment($newentry, $newentry->attachment)) {
-                $newentry->attachment = $newfilename;
-            } else {
-                unset($newentry->attachment);
-            }
+    //prepare extra data
+    if ($aliases = $DB->get_records_menu("glossary_alias", array("entryid"=>$id), '', 'id, alias')) {
+        $entry->aliases = implode("\n", $aliases) . "\n";
+    }
+    if ($categoriesarr = $DB->get_records_menu("glossary_entries_categories", array('entryid'=>$id), '', 'id, categoryid')) {
+        // TODO: this fetches cats from both main and secondary glossary :-(
+        $entry->categories = array_values($categoriesarr);
+    }
 
-            if (! update_record("glossary_entries", $newentry)) {
-                error("Could not update your glossary");
-            } else {
-                add_to_log($course->id, "glossary", "update entry", "view.php?id=$cm->id&mode=entry&hook=$newentry->id", $newentry->id,$cm->id);
-           	}
-        } else {
-            error("Could not update this glossary entry because this concept already exist.");
-        }
+} else { // new entry
+    require_capability('mod/glossary:write', $context);
+    // note: guest user does not have any write capability
+    $entry = new stdClass();
+    $entry->id = null;
+}
+
+list($definitionoptions, $attachmentoptions) = glossary_get_editor_and_attachment_options($course, $context, $entry);
+
+$entry = file_prepare_standard_editor($entry, 'definition', $definitionoptions, $context, 'mod_glossary', 'entry', $entry->id);
+$entry = file_prepare_standard_filemanager($entry, 'attachment', $attachmentoptions, $context, 'mod_glossary', 'attachment', $entry->id);
+
+$entry->cmid = $cm->id;
+
+// create form and set initial data
+$mform = new mod_glossary_entry_form(null, array('current'=>$entry, 'cm'=>$cm, 'glossary'=>$glossary,
+                                                 'definitionoptions'=>$definitionoptions, 'attachmentoptions'=>$attachmentoptions));
+
+if ($mform->is_cancelled()){
+    if ($id){
+        redirect("view.php?id=$cm->id&mode=entry&hook=$id");
     } else {
-
-        $newentry->userid = $USER->id;
-        $newentry->timecreated = $timenow;
-        $newentry->sourceglossaryid = 0;
-        $newentry->teacherentry = isteacher($course->id);
-        
-        $permissiongranted = 1;
-        if ( !$glossary->allowduplicatedentries ) {
-            if ($dupentries = get_record("glossary_entries","UCASE(concept)", strtoupper($newentry->concept), "glossaryid", $glossary->id)) {
-                $permissiongranted = 0;
-            }
-        }
-        if ( $permissiongranted ) {
-            if (! $newentry->id = insert_record("glossary_entries", $newentry)) {
-                error("Could not insert this new entry");
-            } else {
-                $e = $newentry->id;
-                $newentry->attachment = $_FILES["attachment"];
-                if ($newfilename = glossary_add_attachment($newentry, $newentry->attachment)) {
-                    $newentry->attachment = $newfilename;
-                } else {
-                     unset($newentry->attachment);
-                }
-                set_field("glossary_entries", "attachment", $newfilename, "id", $newentry->id);
-                add_to_log($course->id, "glossary", "add entry", "view.php?id=$cm->id&mode=entry&hook=$newentry->id", $newentry->id,$cm->id);
-            }
-        } else {
-            error("Could not insert this glossary entry because this concept already exist.");
-        }
+        redirect("view.php?id=$cm->id");
     }
 
-    delete_records("glossary_entries_categories","entryid",$e);
-    delete_records("glossary_alias","entryid",$e);
-
-    if ( isset($form->categories) ) {
-        $newcategory->entryid = $e;
-        foreach ($form->categories as $category) {
-            if ( $category > 0 ) {
-                $newcategory->categoryid = $category;
-                insert_record("glossary_entries_categories",$newcategory);
-            } else {
-                break;
-            }
-        }
+} else if ($data = $mform->get_data()) {
+    $entry = glossary_edit_entry($data, $course, $cm, $glossary, $context);
+    if (core_tag_tag::is_enabled('mod_glossary', 'glossary_entries') && isset($data->tags)) {
+        core_tag_tag::set_item_tags('mod_glossary', 'glossary_entries', $data->id, $context, $data->tags);
     }
-    if ( isset($form->aliases) ) {
-        if ( $aliases = explode("\n",$form->aliases) ) {
-            foreach ($aliases as $alias) {
-                $alias = trim($alias);
-                if ($alias) {
-                    unset($newalias);
-                    $newalias->entryid = $e;
-                    $newalias->alias = $alias;
-                    insert_record("glossary_alias",$newalias);
-                }
-            }
-        }
-    }
-
-    redirect("view.php?id=$cm->id&mode=entry&hook=$newentry->id");
-    die;
-} else {
-    if ($e) {
-        $form = get_record("glossary_entries", "id", $e);
-
-        $newentry->id = $form->id;
-        $newentry->concept = $form->concept;
-        $newentry->definition = $form->definition;
-        $newentry->format = $form->format;
-        $newentry->timemodified = time();
-        $newentry->approved = $glossary->defaultapproval or isteacher($course->id);
-        $newentry->usedynalink = $form->usedynalink;
-        $newentry->casesensitive = $form->casesensitive;
-        $newentry->fullmatch = $form->fullmatch;
-        $newentry->aliases = "";
-
-        if ( $aliases = get_records("glossary_alias","entryid",$e) ) {
-            foreach ($aliases as $alias) {
-                $newentry->aliases .= $alias->alias . "\n";
-            }
-        }
-    }
-}
-//Fill and print the form. 
-//We check every field has a default values here!!
-if (!isset($newentry->concept)) {
-    $newentry->concept = "";
-}
-if (!isset($newentry->aliases)) {
-    $newentry->aliases = "";
-}
-if (!isset($newentry->usedynalink)) {
-    if (isset($CFG->glossary_linkentries)) {
-        $newentry->usedynalink = $CFG->glossary_linkentries;
-    } else {
-        $newentry->usedynalink = 0;
-    }
-}
-if (!isset($newentry->casesensitive)) {
-    if (isset($CFG->glossary_casesensitive)) {
-        $newentry->casesensitive = $CFG->glossary_casesensitive;
-    } else {
-        $newentry->casesensitive = 0;
-    }         
-}
-if (!isset($newentry->fullmatch)) {
-    if (isset($CFG->glossary_fullmatch)) {
-        $newentry->fullmatch = $CFG->glossary_fullmatch;
-    } else {
-        $newentry->fullmatch = 0;
-    }  
-}
-if (!isset($newentry->definition)) {
-    $newentry->definition = "";
-}
-$strglossary = get_string("modulename", "glossary");
-$strglossaries = get_string("modulenameplural", "glossary");
-$stredit = get_string("edit");
-
-if ($usehtmleditor = can_use_richtext_editor()) {
-    $defaultformat = FORMAT_HTML;
-    $onsubmit = "onsubmit=\"copyrichtext(form.text);\"";
-} else {
-    $defaultformat = FORMAT_MOODLE;
-    $onsubmit = "";
+    redirect("view.php?id=$cm->id&mode=entry&hook=$entry->id");
 }
 
-print_header(strip_tags("$course->shortname: $glossary->name"), "$course->fullname",
-             "<A HREF=\"$CFG->wwwroot/course/view.php?id=$course->id\">$course->shortname</A> -> 
-              <A HREF=\"index.php?id=$course->id\">$strglossaries</A> -> 
-              <A HREF=\"view.php?id=$cm->id\">$glossary->name</A> -> $stredit", "",
-              "", true, "", navmenu($course, $cm));
+if (!empty($id)) {
+    $PAGE->navbar->add(get_string('edit'));
+}
 
-    echo '<p align="center"><font size="3"><b>' . stripslashes_safe($glossary->name);
-    echo '</b></font></p>';
+$PAGE->set_title($glossary->name);
+$PAGE->set_heading($course->fullname);
+echo $OUTPUT->header();
+echo $OUTPUT->heading(format_string($glossary->name), 2);
+if ($glossary->intro) {
+    echo $OUTPUT->box(format_module_intro('glossary', $glossary, $cm->id), 'generalbox', 'intro');
+}
 
-/// Info box
+$data = new StdClass();
+$data->tags = core_tag_tag::get_item_tags_array('mod_glossary', 'glossary_entries', $id);
+$mform->set_data($data);
 
-    if ( $glossary->intro ) {
-        print_simple_box_start('center','70%');
-        echo format_text($glossary->intro);
-        print_simple_box_end();
-    }
+$mform->display();
 
-/// Tabbed browsing sections
-$tab = GLOSSARY_ADDENTRY_VIEW;
-include("tabs.html");
+echo $OUTPUT->footer();
 
-include("edit.html");
-
-echo '</center>';
-glossary_print_tabbed_table_end();
-
-print_footer($course);
-
-?>

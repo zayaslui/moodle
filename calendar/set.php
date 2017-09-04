@@ -1,116 +1,60 @@
-<?php // $Id$
+<?php
+// This file is part of Moodle - http://moodle.org/
+//
+// Moodle is free software: you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// Moodle is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU General Public License for more details.
+//
+// You should have received a copy of the GNU General Public License
+// along with Moodle.  If not, see <http://www.gnu.org/licenses/>.
 
-/////////////////////////////////////////////////////////////////////////////
-//                                                                         //
-// NOTICE OF COPYRIGHT                                                     //
-//                                                                         //
-// Moodle - Calendar extension                                             //
-//                                                                         //
-// Copyright (C) 2003-2004  Greek School Network            www.sch.gr     //
-//                                                                         //
-// Designed by:                                                            //
-//     Avgoustos Tsinakos (tsinakos@uom.gr)                                //
-//     Jon Papaioannou (pj@uom.gr)                                         //
-//                                                                         //
-// Programming and development:                                            //
-//     Jon Papaioannou (pj@uom.gr)                                         //
-//                                                                         //
-// For bugs, suggestions, etc contact:                                     //
-//     Jon Papaioannou (pj@uom.gr)                                         //
-//                                                                         //
-// The current module was developed at the University of Macedonia         //
-// (www.uom.gr) under the funding of the Greek School Network (www.sch.gr) //
-// The aim of this project is to provide additional and improved           //
-// functionality to the Asynchronous Distance Education service that the   //
-// Greek School Network deploys.                                           //
-//                                                                         //
-// This program is free software; you can redistribute it and/or modify    //
-// it under the terms of the GNU General Public License as published by    //
-// the Free Software Foundation; either version 2 of the License, or       //
-// (at your option) any later version.                                     //
-//                                                                         //
-// This program is distributed in the hope that it will be useful,         //
-// but WITHOUT ANY WARRANTY; without even the implied warranty of          //
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the           //
-// GNU General Public License for more details:                            //
-//                                                                         //
-//          http://www.gnu.org/copyleft/gpl.html                           //
-//                                                                         //
-/////////////////////////////////////////////////////////////////////////////
+/**
+ * Sets the events filter for the calendar view.
+ *
+ * @package   core_calendar
+ * @copyright 2003 Jon Papaioannou (pj@moodle.org)
+ * @license   http://www.gnu.org/copyleft/gpl.html GNU GPL v3 or later
+ */
+require_once('../config.php');
+require_once($CFG->dirroot.'/calendar/lib.php');
 
-    require_once('../config.php');
-    require_once('lib.php');
+$var = required_param('var', PARAM_ALPHA);
+$return = clean_param(base64_decode(required_param('return', PARAM_RAW)), PARAM_LOCALURL);
+$courseid = optional_param('id', -1, PARAM_INT);
+if ($courseid != -1) {
+    $return = new moodle_url($return, array('course' => $courseid));
+} else {
+    $return = new moodle_url($return);
+}
 
-    require_login();
+if (!confirm_sesskey()) {
+    // Do not call require_sesskey() since this page may be accessed without session (for example by bots).
+    redirect($return);
+}
 
-    require_variable($_GET['from']);
-    require_variable($_GET['var']);
-    optional_variable($_GET['value']);
-    optional_variable($_GET['id']);
-    optional_variable($_GET['cal_d']);
-    optional_variable($_GET['cal_m']);
-    optional_variable($_GET['cal_y']);
+$url = new moodle_url('/calendar/set.php', array('return'=>base64_encode($return->out_as_local_url(false)), 'course' => $courseid, 'var'=>$var, 'sesskey'=>sesskey()));
+$PAGE->set_url($url);
+$PAGE->set_context(context_system::instance());
 
-    switch($_GET['var']) {
-        case 'setcourse':
-            $id = intval($_GET['id']);
-            if($id == 0) {
-                $SESSION->cal_courses_shown = array();
-                calendar_set_referring_course(0);
-            }
-            else if($id == 1) {
-                $SESSION->cal_courses_shown = calendar_get_default_courses(true);
-                calendar_set_referring_course(0);
-            }
-            else {
-                // We don't check for membership anymore: if(isstudent($id, $USER->id) || isteacher($id, $USER->id)) {
-                if(get_record('course', 'id', $id) === false) {
-                    // There is no such course
-                    $SESSION->cal_courses_shown = array();
-                    calendar_set_referring_course(0);
-                }
-                else {
-                    calendar_set_referring_course($id);
-                    $SESSION->cal_courses_shown = $id;
-                }
-            }
+switch($var) {
+    case 'showgroups':
+        calendar_set_event_type_display(CALENDAR_EVENT_GROUP);
         break;
-        case 'showgroups':
-            $SESSION->cal_show_groups = !$SESSION->cal_show_groups;
+    case 'showcourses':
+        calendar_set_event_type_display(CALENDAR_EVENT_COURSE);
         break;
-        case 'showcourses':
-            $SESSION->cal_show_course = !$SESSION->cal_show_course;
+    case 'showglobal':
+        calendar_set_event_type_display(CALENDAR_EVENT_GLOBAL);
         break;
-        case 'showglobal':
-            $SESSION->cal_show_global = !$SESSION->cal_show_global;
+    case 'showuser':
+        calendar_set_event_type_display(CALENDAR_EVENT_USER);
         break;
-        case 'showuser':
-            if($SESSION->cal_show_user) {
-                $SESSION->cal_show_user = false;
-            }
-            else {
-                $SESSION->cal_show_user = $USER->id;
-            }
-        break;
-    }
+}
 
-    switch($_GET['from']) {
-        case 'event':
-            redirect(CALENDAR_URL.'event.php?action='.$_GET['action'].'&type='.$_GET['type'].'&id='.intval($_GET['id']));
-        break;
-        case 'month':
-            redirect(CALENDAR_URL.'view.php?view=month&cal_d='.$_GET['cal_d'].'&cal_m='.$_GET['cal_m'].'&cal_y='.$_GET['cal_y']);
-        break;
-        case 'upcoming':
-            redirect(CALENDAR_URL.'view.php?view=upcoming');
-        break;
-        case 'day':
-            redirect(CALENDAR_URL.'view.php?view=day&cal_d='.$_GET['cal_d'].'&cal_m='.$_GET['cal_m'].'&cal_y='.$_GET['cal_y']);
-        break;
-        case 'course':
-            redirect($CFG->wwwroot.'/course/view.php?id='.intval($_GET['id']));
-        break;
-        default:
-
-    }
-?>
+redirect($return);

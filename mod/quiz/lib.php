@@ -1,2841 +1,2253 @@
-<?PHP  // $Id$
+<?php
+// This file is part of Moodle - http://moodle.org/
+//
+// Moodle is free software: you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// Moodle is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU General Public License for more details.
+//
+// You should have received a copy of the GNU General Public License
+// along with Moodle.  If not, see <http://www.gnu.org/licenses/>.
 
-/// Library of function for module quiz
-
-/// CONSTANTS ///////////////////////////////////////////////////////////////////
-
-define("GRADEHIGHEST", "1");
-define("GRADEAVERAGE", "2");
-define("ATTEMPTFIRST", "3");
-define("ATTEMPTLAST",  "4");
-$QUIZ_GRADE_METHOD = array ( GRADEHIGHEST => get_string("gradehighest", "quiz"),
-                             GRADEAVERAGE => get_string("gradeaverage", "quiz"),
-                             ATTEMPTFIRST => get_string("attemptfirst", "quiz"),
-                             ATTEMPTLAST  => get_string("attemptlast", "quiz"));
-
-define("SHORTANSWER",   "1");
-define("TRUEFALSE",     "2");
-define("MULTICHOICE",   "3");
-define("RANDOM",        "4");
-define("MATCH",         "5");
-define("RANDOMSAMATCH", "6");
-define("DESCRIPTION",   "7");
-define("NUMERICAL",     "8");
-define("MULTIANSWER",   "9");
-
-$QUIZ_QUESTION_TYPE = array ( MULTICHOICE   => get_string("multichoice", "quiz"),
-                              TRUEFALSE     => get_string("truefalse", "quiz"),
-                              SHORTANSWER   => get_string("shortanswer", "quiz"),
-                              NUMERICAL     => get_string("numerical", "quiz"),
-                              MATCH         => get_string("match", "quiz"),
-                              DESCRIPTION   => get_string("description", "quiz"),
-                              RANDOM        => get_string("random", "quiz"),
-                              RANDOMSAMATCH => get_string("randomsamatch", "quiz"),
-                              MULTIANSWER   => get_string("multianswer", "quiz")
-                              );
+/**
+ * Library of functions for the quiz module.
+ *
+ * This contains functions that are called also from outside the quiz module
+ * Functions that are only called by the quiz module itself are in {@link locallib.php}
+ *
+ * @package    mod_quiz
+ * @copyright  1999 onwards Martin Dougiamas {@link http://moodle.com}
+ * @license    http://www.gnu.org/copyleft/gpl.html GNU GPL v3 or later
+ */
 
 
-define("QUIZ_PICTURE_MAX_HEIGHT", "600");   // Not currently implemented
-define("QUIZ_PICTURE_MAX_WIDTH",  "600");   // Not currently implemented
+defined('MOODLE_INTERNAL') || die();
 
-define("QUIZ_MAX_NUMBER_ANSWERS", "10");
+require_once($CFG->libdir . '/eventslib.php');
+require_once($CFG->dirroot . '/calendar/lib.php');
 
-define("QUIZ_MAX_EVENT_LENGTH", "432000");   // 5 days maximum
 
-/// FUNCTIONS ///////////////////////////////////////////////////////////////////
+/**#@+
+ * Option controlling what options are offered on the quiz settings form.
+ */
+define('QUIZ_MAX_ATTEMPT_OPTION', 10);
+define('QUIZ_MAX_QPP_OPTION', 50);
+define('QUIZ_MAX_DECIMAL_OPTION', 5);
+define('QUIZ_MAX_Q_DECIMAL_OPTION', 7);
+/**#@-*/
 
+/**#@+
+ * Options determining how the grades from individual attempts are combined to give
+ * the overall grade for a user
+ */
+define('QUIZ_GRADEHIGHEST', '1');
+define('QUIZ_GRADEAVERAGE', '2');
+define('QUIZ_ATTEMPTFIRST', '3');
+define('QUIZ_ATTEMPTLAST',  '4');
+/**#@-*/
+
+/**
+ * @var int If start and end date for the quiz are more than this many seconds apart
+ * they will be represented by two separate events in the calendar
+ */
+define('QUIZ_MAX_EVENT_LENGTH', 5*24*60*60); // 5 days.
+
+/**#@+
+ * Options for navigation method within quizzes.
+ */
+define('QUIZ_NAVMETHOD_FREE', 'free');
+define('QUIZ_NAVMETHOD_SEQ',  'sequential');
+/**#@-*/
+
+/**
+ * Event types.
+ */
+define('QUIZ_EVENT_TYPE_OPEN', 'open');
+define('QUIZ_EVENT_TYPE_CLOSE', 'close');
+
+/**
+ * Given an object containing all the necessary data,
+ * (defined by the form in mod_form.php) this function
+ * will create a new instance and return the id number
+ * of the new instance.
+ *
+ * @param object $quiz the data that came from the form.
+ * @return mixed the id of the new instance on success,
+ *          false or a string error message on failure.
+ */
 function quiz_add_instance($quiz) {
-/// Given an object containing all the necessary data, 
-/// (defined by the form in mod.html) this function 
-/// will create a new instance and return the id number 
-/// of the new instance.
+    global $DB;
+    $cmid = $quiz->coursemodule;
 
-    global $SESSION;
-
-    unset($SESSION->modform);
-
-    $quiz->created      = time();
-    $quiz->timemodified = time();
-    $quiz->timeopen = make_timestamp($quiz->openyear, $quiz->openmonth, $quiz->openday, 
-                                     $quiz->openhour, $quiz->openminute, 0);
-    $quiz->timeclose = make_timestamp($quiz->closeyear, $quiz->closemonth, $quiz->closeday, 
-                                      $quiz->closehour, $quiz->closeminute, 0);
-
-    if (!$quiz->id = insert_record("quiz", $quiz)) {
-        return false;  // some error occurred
+    // Process the options from the form.
+    $quiz->created = time();
+    $result = quiz_process_options($quiz);
+    if ($result && is_string($result)) {
+        return $result;
     }
 
-    // The grades for every question in this quiz are stored in an array
-    if ($quiz->grades) {
-        foreach ($quiz->grades as $question => $grade) {
-            if ($question) {
-                unset($questiongrade);
-                $questiongrade->quiz = $quiz->id;
-                $questiongrade->question = $question;
-                $questiongrade->grade = $grade;
-                if (!insert_record("quiz_question_grades", $questiongrade)) {
-                    return false;
-                }
-            }
-        }
-    }
+    // Try to store it in the database.
+    $quiz->id = $DB->insert_record('quiz', $quiz);
 
-    delete_records('event', 'modulename', 'quiz', 'instance', $quiz->id);  // Just in case
+    // Create the first section for this quiz.
+    $DB->insert_record('quiz_sections', array('quizid' => $quiz->id,
+            'firstslot' => 1, 'heading' => '', 'shufflequestions' => 0));
 
-    $event = NULL;
-    $event->name        = $quiz->name;
-    $event->description = $quiz->intro;
-    $event->courseid    = $quiz->course;
-    $event->groupid     = 0;
-    $event->userid      = 0;
-    $event->modulename  = 'quiz';
-    $event->instance    = $quiz->id;
-    $event->eventtype   = 'open';
-    $event->timestart   = $quiz->timeopen;
-    $event->visible     = instance_is_visible('quiz', $quiz->id);
-    $event->timeduration = ($quiz->timeclose - $quiz->timeopen);
-
-    if ($event->timeduration > QUIZ_MAX_EVENT_LENGTH) {  /// Long durations create two events
-        $event2 = $event;
-
-        $event->name         .= ' ('.get_string('quizopens', 'quiz').')';
-        $event->timeduration  = 0;
-
-        $event2->timestart    = $quiz->timeclose;
-        $event2->eventtype    = 'close';
-        $event2->timeduration = 0;
-        $event2->name        .= ' ('.get_string('quizcloses', 'quiz').')';
-
-        add_event($event2);
-    }
-
-    add_event($event);
+    // Do the processing required after an add or an update.
+    quiz_after_add_or_update($quiz);
 
     return $quiz->id;
 }
 
+/**
+ * Given an object containing all the necessary data,
+ * (defined by the form in mod_form.php) this function
+ * will update an existing instance with new data.
+ *
+ * @param object $quiz the data that came from the form.
+ * @return mixed true on success, false or a string error message on failure.
+ */
+function quiz_update_instance($quiz, $mform) {
+    global $CFG, $DB;
+    require_once($CFG->dirroot . '/mod/quiz/locallib.php');
 
-function quiz_update_instance($quiz) {
-/// Given an object containing all the necessary data, 
-/// (defined by the form in mod.html) this function 
-/// will update an existing instance with new data.
+    // Process the options from the form.
+    $result = quiz_process_options($quiz);
+    if ($result && is_string($result)) {
+        return $result;
+    }
 
-    global $SESSION;
+    // Get the current value, so we can see what changed.
+    $oldquiz = $DB->get_record('quiz', array('id' => $quiz->instance));
 
-    unset($SESSION->modform);
+    // We need two values from the existing DB record that are not in the form,
+    // in some of the function calls below.
+    $quiz->sumgrades = $oldquiz->sumgrades;
+    $quiz->grade     = $oldquiz->grade;
 
-    $quiz->timemodified = time();
-    $quiz->timeopen = make_timestamp($quiz->openyear, $quiz->openmonth, $quiz->openday, 
-                                     $quiz->openhour, $quiz->openminute, 0);
-    $quiz->timeclose = make_timestamp($quiz->closeyear, $quiz->closemonth, $quiz->closeday, 
-                                      $quiz->closehour, $quiz->closeminute, 0);
+    // Update the database.
     $quiz->id = $quiz->instance;
+    $DB->update_record('quiz', $quiz);
 
-    if (!update_record("quiz", $quiz)) {
-        return false;  // some error occurred
+    // Do the processing required after an add or an update.
+    quiz_after_add_or_update($quiz);
+
+    if ($oldquiz->grademethod != $quiz->grademethod) {
+        quiz_update_all_final_grades($quiz);
+        quiz_update_grades($quiz);
     }
 
-
-    // The grades for every question in this quiz are stored in an array
-    // Insert or update records as appropriate
-
-    $existing = get_records("quiz_question_grades", "quiz", $quiz->id, "", "question,grade,id");
-
-    if ($quiz->grades) {
-        foreach ($quiz->grades as $question => $grade) {
-            if ($question) {
-                unset($questiongrade);
-                $questiongrade->quiz = $quiz->id;
-                $questiongrade->question = $question;
-                $questiongrade->grade = $grade;
-                if (isset($existing[$question])) {
-                    if ($existing[$question]->grade != $grade) {
-                        $questiongrade->id = $existing[$question]->id;
-                        if (!update_record("quiz_question_grades", $questiongrade)) {
-                            return false;
-                        }
-                    }
-                } else {
-                    if (!insert_record("quiz_question_grades", $questiongrade)) {
-                        return false;
-                    }
-                }
-            }
-        }
+    $quizdateschanged = $oldquiz->timelimit   != $quiz->timelimit
+                     || $oldquiz->timeclose   != $quiz->timeclose
+                     || $oldquiz->graceperiod != $quiz->graceperiod;
+    if ($quizdateschanged) {
+        quiz_update_open_attempts(array('quizid' => $quiz->id));
     }
 
-    delete_records('event', 'modulename', 'quiz', 'instance', $quiz->id);  // Delete old and add new
+    // Delete any previous preview attempts.
+    quiz_delete_previews($quiz);
 
-    $event = NULL;
-    $event->name        = $quiz->name;
-    $event->description = $quiz->intro;
-    $event->courseid    = $quiz->course;
-    $event->groupid     = 0;
-    $event->userid      = 0;
-    $event->modulename  = 'quiz';
-    $event->instance    = $quiz->id;
-    $event->eventtype   = 'open';
-    $event->timestart   = $quiz->timeopen;
-    $event->visible     = instance_is_visible('quiz', $quiz->id);
-    $event->timeduration = ($quiz->timeclose - $quiz->timeopen);
-
-    if ($event->timeduration > QUIZ_MAX_EVENT_LENGTH) {  /// Long durations create two events
-        $event2 = $event;
-
-        $event->name         .= ' ('.get_string('quizopens', 'quiz').')';
-        $event->timeduration  = 0;
-
-        $event2->timestart    = $quiz->timeclose;
-        $event2->eventtype    = 'close';
-        $event2->timeduration = 0;
-        $event2->name        .= ' ('.get_string('quizcloses', 'quiz').')';
-
-        add_event($event2);
+    // Repaginate, if asked to.
+    if (!empty($quiz->repaginatenow)) {
+        quiz_repaginate_questions($quiz->id, $quiz->questionsperpage);
     }
-
-    add_event($event);
 
     return true;
 }
 
-
+/**
+ * Given an ID of an instance of this module,
+ * this function will permanently delete the instance
+ * and any data that depends on it.
+ *
+ * @param int $id the id of the quiz to delete.
+ * @return bool success or failure.
+ */
 function quiz_delete_instance($id) {
-/// Given an ID of an instance of this module, 
-/// this function will permanently delete the instance 
-/// and any data that depends on it.  
+    global $DB;
 
-    if (! $quiz = get_record("quiz", "id", "$id")) {
-        return false;
+    $quiz = $DB->get_record('quiz', array('id' => $id), '*', MUST_EXIST);
+
+    quiz_delete_all_attempts($quiz);
+    quiz_delete_all_overrides($quiz);
+
+    // Look for random questions that may no longer be used when this quiz is gone.
+    $sql = "SELECT q.id
+              FROM {quiz_slots} slot
+              JOIN {question} q ON q.id = slot.questionid
+             WHERE slot.quizid = ? AND q.qtype = ?";
+    $questionids = $DB->get_fieldset_sql($sql, array($quiz->id, 'random'));
+
+    // We need to do this before we try and delete randoms, otherwise they would still be 'in use'.
+    $DB->delete_records('quiz_slots', array('quizid' => $quiz->id));
+    $DB->delete_records('quiz_sections', array('quizid' => $quiz->id));
+
+    foreach ($questionids as $questionid) {
+        question_delete_question($questionid);
     }
 
-    $result = true;
+    $DB->delete_records('quiz_feedback', array('quizid' => $quiz->id));
 
-    if ($attempts = get_records("quiz_attempts", "quiz", "$quiz->id")) {
-        foreach ($attempts as $attempt) {
-            if (! delete_records("quiz_responses", "attempt", "$attempt->id")) {
-                $result = false;
+    quiz_access_manager::delete_settings($quiz);
+
+    $events = $DB->get_records('event', array('modulename' => 'quiz', 'instance' => $quiz->id));
+    foreach ($events as $event) {
+        $event = calendar_event::load($event);
+        $event->delete();
+    }
+
+    quiz_grade_item_delete($quiz);
+    $DB->delete_records('quiz', array('id' => $quiz->id));
+
+    return true;
+}
+
+/**
+ * Deletes a quiz override from the database and clears any corresponding calendar events
+ *
+ * @param object $quiz The quiz object.
+ * @param int $overrideid The id of the override being deleted
+ * @return bool true on success
+ */
+function quiz_delete_override($quiz, $overrideid) {
+    global $DB;
+
+    if (!isset($quiz->cmid)) {
+        $cm = get_coursemodule_from_instance('quiz', $quiz->id, $quiz->course);
+        $quiz->cmid = $cm->id;
+    }
+
+    $override = $DB->get_record('quiz_overrides', array('id' => $overrideid), '*', MUST_EXIST);
+
+    // Delete the events.
+    $events = $DB->get_records('event', array('modulename' => 'quiz',
+            'instance' => $quiz->id, 'groupid' => (int)$override->groupid,
+            'userid' => (int)$override->userid));
+    foreach ($events as $event) {
+        $eventold = calendar_event::load($event);
+        $eventold->delete();
+    }
+
+    $DB->delete_records('quiz_overrides', array('id' => $overrideid));
+
+    // Set the common parameters for one of the events we will be triggering.
+    $params = array(
+        'objectid' => $override->id,
+        'context' => context_module::instance($quiz->cmid),
+        'other' => array(
+            'quizid' => $override->quiz
+        )
+    );
+    // Determine which override deleted event to fire.
+    if (!empty($override->userid)) {
+        $params['relateduserid'] = $override->userid;
+        $event = \mod_quiz\event\user_override_deleted::create($params);
+    } else {
+        $params['other']['groupid'] = $override->groupid;
+        $event = \mod_quiz\event\group_override_deleted::create($params);
+    }
+
+    // Trigger the override deleted event.
+    $event->add_record_snapshot('quiz_overrides', $override);
+    $event->trigger();
+
+    return true;
+}
+
+/**
+ * Deletes all quiz overrides from the database and clears any corresponding calendar events
+ *
+ * @param object $quiz The quiz object.
+ */
+function quiz_delete_all_overrides($quiz) {
+    global $DB;
+
+    $overrides = $DB->get_records('quiz_overrides', array('quiz' => $quiz->id), 'id');
+    foreach ($overrides as $override) {
+        quiz_delete_override($quiz, $override->id);
+    }
+}
+
+/**
+ * Updates a quiz object with override information for a user.
+ *
+ * Algorithm:  For each quiz setting, if there is a matching user-specific override,
+ *   then use that otherwise, if there are group-specific overrides, return the most
+ *   lenient combination of them.  If neither applies, leave the quiz setting unchanged.
+ *
+ *   Special case: if there is more than one password that applies to the user, then
+ *   quiz->extrapasswords will contain an array of strings giving the remaining
+ *   passwords.
+ *
+ * @param object $quiz The quiz object.
+ * @param int $userid The userid.
+ * @return object $quiz The updated quiz object.
+ */
+function quiz_update_effective_access($quiz, $userid) {
+    global $DB;
+
+    // Check for user override.
+    $override = $DB->get_record('quiz_overrides', array('quiz' => $quiz->id, 'userid' => $userid));
+
+    if (!$override) {
+        $override = new stdClass();
+        $override->timeopen = null;
+        $override->timeclose = null;
+        $override->timelimit = null;
+        $override->attempts = null;
+        $override->password = null;
+    }
+
+    // Check for group overrides.
+    $groupings = groups_get_user_groups($quiz->course, $userid);
+
+    if (!empty($groupings[0])) {
+        // Select all overrides that apply to the User's groups.
+        list($extra, $params) = $DB->get_in_or_equal(array_values($groupings[0]));
+        $sql = "SELECT * FROM {quiz_overrides}
+                WHERE groupid $extra AND quiz = ?";
+        $params[] = $quiz->id;
+        $records = $DB->get_records_sql($sql, $params);
+
+        // Combine the overrides.
+        $opens = array();
+        $closes = array();
+        $limits = array();
+        $attempts = array();
+        $passwords = array();
+
+        foreach ($records as $gpoverride) {
+            if (isset($gpoverride->timeopen)) {
+                $opens[] = $gpoverride->timeopen;
             }
+            if (isset($gpoverride->timeclose)) {
+                $closes[] = $gpoverride->timeclose;
+            }
+            if (isset($gpoverride->timelimit)) {
+                $limits[] = $gpoverride->timelimit;
+            }
+            if (isset($gpoverride->attempts)) {
+                $attempts[] = $gpoverride->attempts;
+            }
+            if (isset($gpoverride->password)) {
+                $passwords[] = $gpoverride->password;
+            }
+        }
+        // If there is a user override for a setting, ignore the group override.
+        if (is_null($override->timeopen) && count($opens)) {
+            $override->timeopen = min($opens);
+        }
+        if (is_null($override->timeclose) && count($closes)) {
+            if (in_array(0, $closes)) {
+                $override->timeclose = 0;
+            } else {
+                $override->timeclose = max($closes);
+            }
+        }
+        if (is_null($override->timelimit) && count($limits)) {
+            if (in_array(0, $limits)) {
+                $override->timelimit = 0;
+            } else {
+                $override->timelimit = max($limits);
+            }
+        }
+        if (is_null($override->attempts) && count($attempts)) {
+            if (in_array(0, $attempts)) {
+                $override->attempts = 0;
+            } else {
+                $override->attempts = max($attempts);
+            }
+        }
+        if (is_null($override->password) && count($passwords)) {
+            $override->password = array_shift($passwords);
+            if (count($passwords)) {
+                $override->extrapasswords = $passwords;
+            }
+        }
+
+    }
+
+    // Merge with quiz defaults.
+    $keys = array('timeopen', 'timeclose', 'timelimit', 'attempts', 'password', 'extrapasswords');
+    foreach ($keys as $key) {
+        if (isset($override->{$key})) {
+            $quiz->{$key} = $override->{$key};
         }
     }
 
-    if (! delete_records("quiz_attempts", "quiz", "$quiz->id")) {
-        $result = false;
+    return $quiz;
+}
+
+/**
+ * Delete all the attempts belonging to a quiz.
+ *
+ * @param object $quiz The quiz object.
+ */
+function quiz_delete_all_attempts($quiz) {
+    global $CFG, $DB;
+    require_once($CFG->dirroot . '/mod/quiz/locallib.php');
+    question_engine::delete_questions_usage_by_activities(new qubaids_for_quiz($quiz->id));
+    $DB->delete_records('quiz_attempts', array('quiz' => $quiz->id));
+    $DB->delete_records('quiz_grades', array('quiz' => $quiz->id));
+}
+
+/**
+ * Get the best current grade for a particular user in a quiz.
+ *
+ * @param object $quiz the quiz settings.
+ * @param int $userid the id of the user.
+ * @return float the user's current grade for this quiz, or null if this user does
+ * not have a grade on this quiz.
+ */
+function quiz_get_best_grade($quiz, $userid) {
+    global $DB;
+    $grade = $DB->get_field('quiz_grades', 'grade',
+            array('quiz' => $quiz->id, 'userid' => $userid));
+
+    // Need to detect errors/no result, without catching 0 grades.
+    if ($grade === false) {
+        return null;
     }
 
-    if (! delete_records("quiz_grades", "quiz", "$quiz->id")) {
-        $result = false;
+    return $grade + 0; // Convert to number.
+}
+
+/**
+ * Is this a graded quiz? If this method returns true, you can assume that
+ * $quiz->grade and $quiz->sumgrades are non-zero (for example, if you want to
+ * divide by them).
+ *
+ * @param object $quiz a row from the quiz table.
+ * @return bool whether this is a graded quiz.
+ */
+function quiz_has_grades($quiz) {
+    return $quiz->grade >= 0.000005 && $quiz->sumgrades >= 0.000005;
+}
+
+/**
+ * Does this quiz allow multiple tries?
+ *
+ * @return bool
+ */
+function quiz_allows_multiple_tries($quiz) {
+    $bt = question_engine::get_behaviour_type($quiz->preferredbehaviour);
+    return $bt->allows_multiple_submitted_responses();
+}
+
+/**
+ * Return a small object with summary information about what a
+ * user has done with a given particular instance of this module
+ * Used for user activity reports.
+ * $return->time = the time they did it
+ * $return->info = a short text description
+ *
+ * @param object $course
+ * @param object $user
+ * @param object $mod
+ * @param object $quiz
+ * @return object|null
+ */
+function quiz_user_outline($course, $user, $mod, $quiz) {
+    global $DB, $CFG;
+    require_once($CFG->libdir . '/gradelib.php');
+    $grades = grade_get_grades($course->id, 'mod', 'quiz', $quiz->id, $user->id);
+
+    if (empty($grades->items[0]->grades)) {
+        return null;
+    } else {
+        $grade = reset($grades->items[0]->grades);
     }
 
-    if (! delete_records("quiz_question_grades", "quiz", "$quiz->id")) {
-        $result = false;
+    $result = new stdClass();
+    // If the user can't see hidden grades, don't return that information.
+    $gitem = grade_item::fetch(array('id' => $grades->items[0]->id));
+    if (!$gitem->hidden || has_capability('moodle/grade:viewhidden', context_course::instance($course->id))) {
+        $result->info = get_string('grade') . ': ' . $grade->str_long_grade;
+    } else {
+        $result->info = get_string('grade') . ': ' . get_string('hidden', 'grades');
     }
 
-    if (! delete_records("quiz", "id", "$quiz->id")) {
-        $result = false;
-    }
-
-    if (! delete_records('event', 'modulename', 'quiz', 'instance', $quiz->id)) {
-        $result = false;
+    // Datesubmitted == time created. dategraded == time modified or time overridden
+    // if grade was last modified by the user themselves use date graded. Otherwise use
+    // date submitted.
+    // TODO: move this copied & pasted code somewhere in the grades API. See MDL-26704.
+    if ($grade->usermodified == $user->id || empty($grade->datesubmitted)) {
+        $result->time = $grade->dategraded;
+    } else {
+        $result->time = $grade->datesubmitted;
     }
 
     return $result;
 }
 
-function quiz_delete_course($course) {
-/// Given a course object, this function will clean up anything that
-/// would be leftover after all the instances were deleted
-/// In this case, all non-publish quiz categories and questions
+/**
+ * Print a detailed representation of what a  user has done with
+ * a given particular instance of this module, for user activity reports.
+ *
+ * @param object $course
+ * @param object $user
+ * @param object $mod
+ * @param object $quiz
+ * @return bool
+ */
+function quiz_user_complete($course, $user, $mod, $quiz) {
+    global $DB, $CFG, $OUTPUT;
+    require_once($CFG->libdir . '/gradelib.php');
+    require_once($CFG->dirroot . '/mod/quiz/locallib.php');
 
-    if ($categories = get_records_select("quiz_categories", "course = '$course->id' AND publish = '0'")) {
-        foreach ($categories as $category) {
-            if ($questions = get_records("quiz_questions", "category", $category->id)) {
-                foreach ($questions as $question) {
-                    delete_records("quiz_answers", "question", $question->id);
-                    delete_records("quiz_match", "question", $question->id);
-                    delete_records("quiz_match_sub", "question", $question->id);
-                    delete_records("quiz_multianswers", "question", $question->id);
-                    delete_records("quiz_multichoice", "question", $question->id);
-                    delete_records("quiz_numerical", "question", $question->id);
-                    delete_records("quiz_randommatch", "question", $question->id);
-                    delete_records("quiz_responses", "question", $question->id);
-                    delete_records("quiz_shortanswer", "question", $question->id);
-                    delete_records("quiz_truefalse", "question", $question->id);
-                }
-                delete_records("quiz_questions", "category", $category->id);
+    $grades = grade_get_grades($course->id, 'mod', 'quiz', $quiz->id, $user->id);
+    if (!empty($grades->items[0]->grades)) {
+        $grade = reset($grades->items[0]->grades);
+        // If the user can't see hidden grades, don't return that information.
+        $gitem = grade_item::fetch(array('id' => $grades->items[0]->id));
+        if (!$gitem->hidden || has_capability('moodle/grade:viewhidden', context_course::instance($course->id))) {
+            echo $OUTPUT->container(get_string('grade').': '.$grade->str_long_grade);
+            if ($grade->str_feedback) {
+                echo $OUTPUT->container(get_string('feedback').': '.$grade->str_feedback);
+            }
+        } else {
+            echo $OUTPUT->container(get_string('grade') . ': ' . get_string('hidden', 'grades'));
+            if ($grade->str_feedback) {
+                echo $OUTPUT->container(get_string('feedback').': '.get_string('hidden', 'grades'));
             }
         }
-        return delete_records("quiz_categories", "course", $course->id);
-    }
-    return true;
-}
-
-
-function quiz_user_outline($course, $user, $mod, $quiz) {
-/// Return a small object with summary information about what a 
-/// user has done with a given particular instance of this module
-/// Used for user activity reports.
-/// $return->time = the time they did it
-/// $return->info = a short text description
-    if ($grade = get_record("quiz_grades", "userid", $user->id, "quiz", $quiz->id)) {
-        
-        if ($grade->grade) {
-            $result->info = get_string("grade").": $grade->grade";
-        }
-        $result->time = $grade->timemodified;
-        return $result;
-    }
-    return NULL;
-
-    return $return;
-}
-
-function quiz_user_complete($course, $user, $mod, $quiz) {
-/// Print a detailed representation of what a  user has done with 
-/// a given particular instance of this module, for user activity reports.
-
-    return true;
-}
-
-function quiz_cron () {
-/// Function to be run periodically according to the moodle cron
-/// This function searches for things that need to be done, such 
-/// as sending out mail, toggling flags etc ... 
-
-    global $CFG;
-
-    return true;
-}
-
-function quiz_grades($quizid) {
-/// Must return an array of grades, indexed by user, and a max grade.
-
-    $quiz = get_record("quiz", "id", $quizid);
-    if (empty($quiz) or empty($quiz->grade)) {
-        return NULL;
     }
 
-    $return->grades = get_records_menu("quiz_grades", "quiz", $quizid, "", "userid,grade");
-    $return->maxgrade = get_field("quiz", "grade", "id", "$quizid");
-    return $return;
-}
-
-function quiz_get_participants($quizid) {
-/// Returns an array of users who have data in a given quiz
-/// (users with records in quiz_attempts, students)
-
-    global $CFG;
-
-    return get_records_sql("SELECT DISTINCT u.*
-                            FROM {$CFG->prefix}user u,
-                                 {$CFG->prefix}quiz_attempts a
-                            WHERE a.quiz = '$quizid' and  
-                                  u.id = a.userid");
-}
-
-function quiz_refresh_events($courseid = 0) {
-// This standard function will check all instances of this module
-// and make sure there are up-to-date events created for each of them.
-// If courseid = 0, then every quiz event in the site is checked, else
-// only quiz events belonging to the course specified are checked.
-// This function is used, in its new format, by restore_refresh_events()
-
-    if ($courseid == 0) {
-        if (! $quizzes = get_records("quiz")) {
-            return true;
-        }
-    } else {
-        if (! $quizzes = get_records("quiz", "course", $courseid)) {
-            return true;
-        }
-    }
-    $moduleid = get_field('modules', 'id', 'name', 'quiz');
-    
-    foreach ($quizzes as $quiz) {
-        $event = NULL;
-        $event2 = NULL;
-        $event2old = NULL;
-
-        if ($events = get_records_select('event', "modulename = 'quiz' AND instance = '$quiz->id' ORDER BY timestart")) {
-            $event = array_shift($events);
-            if (!empty($events)) {
-                $event2old = array_shift($events);
-                if (!empty($events)) {
-                    foreach ($events as $badevent) {
-                        delete_records('event', 'id', $badevent->id);
+    if ($attempts = $DB->get_records('quiz_attempts',
+            array('userid' => $user->id, 'quiz' => $quiz->id), 'attempt')) {
+        foreach ($attempts as $attempt) {
+            echo get_string('attempt', 'quiz', $attempt->attempt) . ': ';
+            if ($attempt->state != quiz_attempt::FINISHED) {
+                echo quiz_attempt_state_name($attempt->state);
+            } else {
+                if (!isset($gitem)) {
+                    if (!empty($grades->items[0]->grades)) {
+                        $gitem = grade_item::fetch(array('id' => $grades->items[0]->id));
+                    } else {
+                        $gitem = new stdClass();
+                        $gitem->hidden = true;
                     }
                 }
+                if (!$gitem->hidden || has_capability('moodle/grade:viewhidden', context_course::instance($course->id))) {
+                    echo quiz_format_grade($quiz, $attempt->sumgrades) . '/' . quiz_format_grade($quiz, $quiz->sumgrades);
+                } else {
+                    echo get_string('hidden', 'grades');
+                }
             }
+            echo ' - '.userdate($attempt->timemodified).'<br />';
         }
-
-        $event->name        = addslashes($quiz->name);
-        $event->description = addslashes($quiz->intro);
-        $event->courseid    = $quiz->course;
-        $event->groupid     = 0;
-        $event->userid      = 0;
-        $event->modulename  = 'quiz';
-        $event->instance    = $quiz->id;
-        $event->visible     = instance_is_visible('quiz', $quiz->id);
-        $event->timestart   = $quiz->timeopen;
-        $event->eventtype   = 'open';
-        $event->timeduration = ($quiz->timeclose - $quiz->timeopen);
-
-        if ($event->timeduration > QUIZ_MAX_EVENT_LENGTH) {  /// Set up two events
-
-            $event2 = $event;
-
-            $event->name         = addslashes($quiz->name).' ('.get_string('quizopens', 'quiz').')';
-            $event->timeduration = 0;
-
-            $event2->name        = addslashes($quiz->name).' ('.get_string('quizcloses', 'quiz').')';
-            $event2->timestart   = $quiz->timeclose;
-            $event2->eventtype   = 'close';
-            $event2->timeduration = 0;
-
-            if (empty($event2old->id)) {
-                unset($event2->id);
-                add_event($event2);
-            } else {
-                $event2->id = $event2old->id;
-                update_event($event2);
-            }
-        } else if (!empty($event2->id)) {
-            delete_event($event2->id);
-        }
-
-        if (empty($event->id)) {
-            add_event($event);
-        } else {
-            update_event($event);
-        }
-
+    } else {
+        print_string('noattempts', 'quiz');
     }
+
     return true;
 }
 
-/// SQL FUNCTIONS ////////////////////////////////////////////////////////////////////
-
-function quiz_move_questions($category1, $category2) {
+/**
+ * Quiz periodic clean-up tasks.
+ */
+function quiz_cron() {
     global $CFG;
-    return execute_sql("UPDATE {$CFG->prefix}quiz_questions 
-                           SET category = '$category2' 
-                         WHERE category = '$category1'", 
-                       false);
+
+    require_once($CFG->dirroot . '/mod/quiz/cronlib.php');
+    mtrace('');
+
+    $timenow = time();
+    $overduehander = new mod_quiz_overdue_attempt_updater();
+
+    $processto = $timenow - get_config('quiz', 'graceperiodmin');
+
+    mtrace('  Looking for quiz overdue quiz attempts...');
+
+    list($count, $quizcount) = $overduehander->update_overdue_attempts($timenow, $processto);
+
+    mtrace('  Considered ' . $count . ' attempts in ' . $quizcount . ' quizzes.');
+
+    // Run cron for our sub-plugin types.
+    cron_execute_plugin_type('quiz', 'quiz reports');
+    cron_execute_plugin_type('quizaccess', 'quiz access rules');
+
+    return true;
 }
 
-function quiz_get_question_grades($quizid, $questionlist) {
-    global $CFG;
+/**
+ * @param int|array $quizids A quiz ID, or an array of quiz IDs.
+ * @param int $userid the userid.
+ * @param string $status 'all', 'finished' or 'unfinished' to control
+ * @param bool $includepreviews
+ * @return an array of all the user's attempts at this quiz. Returns an empty
+ *      array if there are none.
+ */
+function quiz_get_user_attempts($quizids, $userid, $status = 'finished', $includepreviews = false) {
+    global $DB, $CFG;
+    // TODO MDL-33071 it is very annoying to have to included all of locallib.php
+    // just to get the quiz_attempt::FINISHED constants, but I will try to sort
+    // that out properly for Moodle 2.4. For now, I will just do a quick fix for
+    // MDL-33048.
+    require_once($CFG->dirroot . '/mod/quiz/locallib.php');
 
-    return get_records_sql("SELECT question,grade 
-                            FROM {$CFG->prefix}quiz_question_grades 
-                            WHERE quiz = '$quizid' 
-                            AND question IN ($questionlist)");
+    $params = array();
+    switch ($status) {
+        case 'all':
+            $statuscondition = '';
+            break;
+
+        case 'finished':
+            $statuscondition = ' AND state IN (:state1, :state2)';
+            $params['state1'] = quiz_attempt::FINISHED;
+            $params['state2'] = quiz_attempt::ABANDONED;
+            break;
+
+        case 'unfinished':
+            $statuscondition = ' AND state IN (:state1, :state2)';
+            $params['state1'] = quiz_attempt::IN_PROGRESS;
+            $params['state2'] = quiz_attempt::OVERDUE;
+            break;
+    }
+
+    $quizids = (array) $quizids;
+    list($insql, $inparams) = $DB->get_in_or_equal($quizids, SQL_PARAMS_NAMED);
+    $params += $inparams;
+    $params['userid'] = $userid;
+
+    $previewclause = '';
+    if (!$includepreviews) {
+        $previewclause = ' AND preview = 0';
+    }
+
+    return $DB->get_records_select('quiz_attempts',
+            "quiz $insql AND userid = :userid" . $previewclause . $statuscondition,
+            $params, 'quiz, attempt ASC');
 }
 
-function quiz_get_random_categories($questionlist) {
-/// Given an array of questions, this function looks for random
-/// questions among them and returns a list of categories with 
-/// an associated count of random questions for each.
+/**
+ * Return grade for given user or all users.
+ *
+ * @param int $quizid id of quiz
+ * @param int $userid optional user id, 0 means all users
+ * @return array array of grades, false if none. These are raw grades. They should
+ * be processed with quiz_format_grade for display.
+ */
+function quiz_get_user_grades($quiz, $userid = 0) {
+    global $CFG, $DB;
 
-    global $CFG;
+    $params = array($quiz->id);
+    $usertest = '';
+    if ($userid) {
+        $params[] = $userid;
+        $usertest = 'AND u.id = ?';
+    }
+    return $DB->get_records_sql("
+            SELECT
+                u.id,
+                u.id AS userid,
+                qg.grade AS rawgrade,
+                qg.timemodified AS dategraded,
+                MAX(qa.timefinish) AS datesubmitted
 
-    return get_records_sql_menu("SELECT category,count(*) 
-                            FROM {$CFG->prefix}quiz_questions 
-                            WHERE id IN ($questionlist) 
-                              AND qtype = '".RANDOM."' 
-                              GROUP BY category ");
+            FROM {user} u
+            JOIN {quiz_grades} qg ON u.id = qg.userid
+            JOIN {quiz_attempts} qa ON qa.quiz = qg.quiz AND qa.userid = u.id
+
+            WHERE qg.quiz = ?
+            $usertest
+            GROUP BY u.id, qg.grade, qg.timemodified", $params);
 }
 
-function quiz_get_grade_records($quiz) {
-/// Gets all info required to display the table of quiz results
-/// for report.php
-    global $CFG;
-
-    return get_records_sql("SELECT qg.*, u.firstname, u.lastname, u.picture 
-                            FROM {$CFG->prefix}quiz_grades qg, 
-                                 {$CFG->prefix}user u
-                            WHERE qg.quiz = '$quiz->id'
-                              AND qg.userid = u.id");
+/**
+ * Round a grade to to the correct number of decimal places, and format it for display.
+ *
+ * @param object $quiz The quiz table row, only $quiz->decimalpoints is used.
+ * @param float $grade The grade to round.
+ * @return float
+ */
+function quiz_format_grade($quiz, $grade) {
+    if (is_null($grade)) {
+        return get_string('notyetgraded', 'quiz');
+    }
+    return format_float($grade, $quiz->decimalpoints);
 }
 
-function quiz_get_answers($question, $answerids=NULL) {
-// Given a question, returns the correct answers for a given question
-    global $CFG;
+/**
+ * Determine the correct number of decimal places required to format a grade.
+ *
+ * @param object $quiz The quiz table row, only $quiz->decimalpoints is used.
+ * @return integer
+ */
+function quiz_get_grade_format($quiz) {
+    if (empty($quiz->questiondecimalpoints)) {
+        $quiz->questiondecimalpoints = -1;
+    }
 
-    if (empty($answerids)) {
-        $answeridconstraint = '';
+    if ($quiz->questiondecimalpoints == -1) {
+        return $quiz->decimalpoints;
+    }
+
+    return $quiz->questiondecimalpoints;
+}
+
+/**
+ * Round a grade to the correct number of decimal places, and format it for display.
+ *
+ * @param object $quiz The quiz table row, only $quiz->decimalpoints is used.
+ * @param float $grade The grade to round.
+ * @return float
+ */
+function quiz_format_question_grade($quiz, $grade) {
+    return format_float($grade, quiz_get_grade_format($quiz));
+}
+
+/**
+ * Update grades in central gradebook
+ *
+ * @category grade
+ * @param object $quiz the quiz settings.
+ * @param int $userid specific user only, 0 means all users.
+ * @param bool $nullifnone If a single user is specified and $nullifnone is true a grade item with a null rawgrade will be inserted
+ */
+function quiz_update_grades($quiz, $userid = 0, $nullifnone = true) {
+    global $CFG, $DB;
+    require_once($CFG->libdir . '/gradelib.php');
+
+    if ($quiz->grade == 0) {
+        quiz_grade_item_update($quiz);
+
+    } else if ($grades = quiz_get_user_grades($quiz, $userid)) {
+        quiz_grade_item_update($quiz, $grades);
+
+    } else if ($userid && $nullifnone) {
+        $grade = new stdClass();
+        $grade->userid = $userid;
+        $grade->rawgrade = null;
+        quiz_grade_item_update($quiz, $grade);
+
     } else {
-        $answeridconstraint = " AND a.id IN ($answerids) ";
+        quiz_grade_item_update($quiz);
+    }
+}
+
+/**
+ * Create or update the grade item for given quiz
+ *
+ * @category grade
+ * @param object $quiz object with extra cmidnumber
+ * @param mixed $grades optional array/object of grade(s); 'reset' means reset grades in gradebook
+ * @return int 0 if ok, error code otherwise
+ */
+function quiz_grade_item_update($quiz, $grades = null) {
+    global $CFG, $OUTPUT;
+    require_once($CFG->dirroot . '/mod/quiz/locallib.php');
+    require_once($CFG->libdir . '/gradelib.php');
+
+    if (array_key_exists('cmidnumber', $quiz)) { // May not be always present.
+        $params = array('itemname' => $quiz->name, 'idnumber' => $quiz->cmidnumber);
+    } else {
+        $params = array('itemname' => $quiz->name);
     }
 
-    switch ($question->qtype) {
-        case SHORTANSWER:       // Could be multiple answers
-            return get_records_sql("SELECT a.*, sa.usecase
-                                      FROM {$CFG->prefix}quiz_shortanswer sa,  
-                                           {$CFG->prefix}quiz_answers a
-                                     WHERE sa.question = '$question->id' 
-                                       AND sa.question = a.question "
-                                  . $answeridconstraint);
+    if ($quiz->grade > 0) {
+        $params['gradetype'] = GRADE_TYPE_VALUE;
+        $params['grademax']  = $quiz->grade;
+        $params['grademin']  = 0;
 
-        case TRUEFALSE:         // Should be always two answers
-            return get_records("quiz_answers", "question", $question->id);
+    } else {
+        $params['gradetype'] = GRADE_TYPE_NONE;
+    }
 
-        case MULTICHOICE:       // Should be multiple answers
-            return get_records_sql("SELECT a.*, mc.single
-                                      FROM {$CFG->prefix}quiz_multichoice mc, 
-                                           {$CFG->prefix}quiz_answers a
-                                     WHERE mc.question = '$question->id' 
-                                       AND mc.question = a.question "
-                                  . $answeridconstraint);
+    // What this is trying to do:
+    // 1. If the quiz is set to not show grades while the quiz is still open,
+    //    and is set to show grades after the quiz is closed, then create the
+    //    grade_item with a show-after date that is the quiz close date.
+    // 2. If the quiz is set to not show grades at either of those times,
+    //    create the grade_item as hidden.
+    // 3. If the quiz is set to show grades, create the grade_item visible.
+    $openreviewoptions = mod_quiz_display_options::make_from_quiz($quiz,
+            mod_quiz_display_options::LATER_WHILE_OPEN);
+    $closedreviewoptions = mod_quiz_display_options::make_from_quiz($quiz,
+            mod_quiz_display_options::AFTER_CLOSE);
+    if ($openreviewoptions->marks < question_display_options::MARK_AND_MAX &&
+            $closedreviewoptions->marks < question_display_options::MARK_AND_MAX) {
+        $params['hidden'] = 1;
 
-        case MATCH:
-            return get_records("quiz_match_sub", "question", $question->id);
+    } else if ($openreviewoptions->marks < question_display_options::MARK_AND_MAX &&
+            $closedreviewoptions->marks >= question_display_options::MARK_AND_MAX) {
+        if ($quiz->timeclose) {
+            $params['hidden'] = $quiz->timeclose;
+        } else {
+            $params['hidden'] = 1;
+        }
 
-        case RANDOMSAMATCH:       // Could be any of many answers, return them all
-            return get_records_sql("SELECT a.*
-                                      FROM {$CFG->prefix}quiz_questions q,  
-                                           {$CFG->prefix}quiz_answers a
-                                     WHERE q.category = '$question->category' 
-                                       AND q.qtype = ".SHORTANSWER."
-                                       AND q.id = a.question ");
+    } else {
+        // Either
+        // a) both open and closed enabled
+        // b) open enabled, closed disabled - we can not "hide after",
+        //    grades are kept visible even after closing.
+        $params['hidden'] = 0;
+    }
 
-        case NUMERICAL:         // Logical support for multiple answers
-            return get_records_sql("SELECT a.*, n.min, n.max
-                                      FROM {$CFG->prefix}quiz_numerical n,
-                                           {$CFG->prefix}quiz_answers a
-                                     WHERE a.question = '$question->id'
-                                       AND n.answer = a.id "
-                                  . $answeridconstraint);
+    if (!$params['hidden']) {
+        // If the grade item is not hidden by the quiz logic, then we need to
+        // hide it if the quiz is hidden from students.
+        if (property_exists($quiz, 'visible')) {
+            // Saving the quiz form, and cm not yet updated in the database.
+            $params['hidden'] = !$quiz->visible;
+        } else {
+            $cm = get_coursemodule_from_instance('quiz', $quiz->id);
+            $params['hidden'] = !$cm->visible;
+        }
+    }
 
-        case DESCRIPTION:
-            return true; // there are no answers for description
+    if ($grades  === 'reset') {
+        $params['reset'] = true;
+        $grades = null;
+    }
 
-        case RANDOM:
-            return quiz_get_answers
-                    (get_record('quiz_questions', 'id', $question->random));
-
-        case MULTIANSWER:       // Includes subanswers
-            $answers = array();
-            
-            $virtualquestion->id = $question->id;
-
-            if ($multianswers = get_records('quiz_multianswers', 'question', $question->id)) {
-                foreach ($multianswers as $multianswer) {
-                    $virtualquestion->qtype = $multianswer->answertype;
-                    // Recursive call for subanswers
-                    $multianswer->subanswers = quiz_get_answers($virtualquestion, $multianswer->answers);
-                    $answers[] = $multianswer;
+    $gradebook_grades = grade_get_grades($quiz->course, 'mod', 'quiz', $quiz->id);
+    if (!empty($gradebook_grades->items)) {
+        $grade_item = $gradebook_grades->items[0];
+        if ($grade_item->locked) {
+            // NOTE: this is an extremely nasty hack! It is not a bug if this confirmation fails badly. --skodak.
+            $confirm_regrade = optional_param('confirm_regrade', 0, PARAM_INT);
+            if (!$confirm_regrade) {
+                if (!AJAX_SCRIPT) {
+                    $message = get_string('gradeitemislocked', 'grades');
+                    $back_link = $CFG->wwwroot . '/mod/quiz/report.php?q=' . $quiz->id .
+                            '&amp;mode=overview';
+                    $regrade_link = qualified_me() . '&amp;confirm_regrade=1';
+                    echo $OUTPUT->box_start('generalbox', 'notice');
+                    echo '<p>'. $message .'</p>';
+                    echo $OUTPUT->container_start('buttons');
+                    echo $OUTPUT->single_button($regrade_link, get_string('regradeanyway', 'grades'));
+                    echo $OUTPUT->single_button($back_link,  get_string('cancel'));
+                    echo $OUTPUT->container_end();
+                    echo $OUTPUT->box_end();
                 }
+                return GRADE_UPDATE_ITEM_LOCKED;
             }
-            return $answers;
-
-        default:
-            return false;
-    }
-}
-
-
-function quiz_get_attempt_responses($attempt) {
-// Given an attempt object, this function gets all the 
-// stored responses and returns them in a format suitable
-// for regrading using quiz_grade_attempt_results()
-    global $CFG;
-   
-    if (!$responses = get_records_sql("SELECT q.id, q.qtype, q.category, q.questiontext, 
-                                              q.defaultgrade, q.image, r.answer 
-                                        FROM {$CFG->prefix}quiz_responses r, 
-                                             {$CFG->prefix}quiz_questions q
-                                       WHERE r.attempt = '$attempt->id' 
-                                         AND q.id = r.question")) {
-        notify("Could not find any responses for that attempt!");
-        return false;
-    }
-
-
-    foreach ($responses as $key => $response) {
-        if ($response->qtype == RANDOM) {
-            $responses[$key]->random = $response->answer;
-            $responses[$response->answer]->delete = true;
-
-            $realresponse = $responses[$response->answer];
-            $realanswer = $realresponse->answer;
-
-            if (is_array($realanswer)) {
-                $responses[$key]->answer = $realanswer;
-            } else if ($realresponse->qtype == NUMERICAL or $realresponse->qtype == SHORTANSWER) {
-                $responses[$key]->answer = array("$realanswer");
-            } else {
-                $responses[$key]->answer = explode(",", $realanswer);
-            }
-
-        } else if ($response->qtype == NUMERICAL or $response->qtype == SHORTANSWER) {
-            $responses[$key]->answer = array($response->answer);
-        } else {
-            $responses[$key]->answer = explode(",",$response->answer);
-        }
-    }
-    foreach ($responses as $key => $response) {
-        if (!empty($response->delete)) {
-            unset($responses[$key]);
         }
     }
 
-    return $responses;
+    return grade_update('mod/quiz', $quiz->course, 'mod', 'quiz', $quiz->id, 0, $grades, $params);
 }
 
-
-function get_list_of_questions($questionlist) {
-/// Returns an ordered list of questions, including course for each
-
+/**
+ * Delete grade item for given quiz
+ *
+ * @category grade
+ * @param object $quiz object
+ * @return object quiz
+ */
+function quiz_grade_item_delete($quiz) {
     global $CFG;
+    require_once($CFG->libdir . '/gradelib.php');
 
-    return get_records_sql("SELECT q.*,c.course 
-                              FROM {$CFG->prefix}quiz_questions q,
-                                   {$CFG->prefix}quiz_categories c
-                             WHERE q.id in ($questionlist)
-                               AND q.category = c.id");
+    return grade_update('mod/quiz', $quiz->course, 'mod', 'quiz', $quiz->id, 0,
+            null, array('deleted' => 1));
 }
 
-//////////////////////////////////////////////////////////////////////////////////////
-/// Any other quiz functions go here.  Each of them must have a name that 
-/// starts with quiz_
+/**
+ * This standard function will check all instances of this module
+ * and make sure there are up-to-date events created for each of them.
+ * If courseid = 0, then every quiz event in the site is checked, else
+ * only quiz events belonging to the course specified are checked.
+ * This function is used, in its new format, by restore_refresh_events()
+ *
+ * @param int $courseid
+ * @param int|stdClass $instance Quiz module instance or ID.
+ * @param int|stdClass $cm Course module object or ID (not used in this module).
+ * @return bool
+ */
+function quiz_refresh_events($courseid = 0, $instance = null, $cm = null) {
+    global $DB;
 
-function quiz_print_comment($text) {
-    global $THEME;
-
-    echo "<span class=\"feedbacktext\">".format_text($text, true, false)."</span>";
-}
-
-function quiz_print_correctanswer($text) {
-    global $THEME;
-
-    echo "<p align=\"right\"><span class=\"highlight\">$text</span></p>";
-}
-
-function quiz_print_question_icon($question, $editlink=true) {
-// Prints a question icon
-
-    global $QUIZ_QUESTION_TYPE;
-
-    if ($editlink) {
-        echo "<a href=\"question.php?id=$question->id\" title=\"".$QUIZ_QUESTION_TYPE[$question->qtype]."\">";
-    }
-    switch ($question->qtype) {
-        case SHORTANSWER:
-            echo '<img border="0" height="16" width="16" src="pix/sa.gif">';
-            break;
-        case TRUEFALSE:
-            echo '<img border="0" height="16" width="16" src="pix/tf.gif">';
-            break;
-        case MULTICHOICE:
-            echo '<img border="0" height="16" width="16" src="pix/mc.gif">';
-            break;
-        case RANDOM:
-            echo '<img border="0" height="16" width="16" src="pix/rs.gif">';
-            break;
-        case MATCH:
-            echo '<img border="0" height="16" width="16" src="pix/ma.gif">';
-            break;
-        case RANDOMSAMATCH:
-            echo '<img border="0" height="16" width="16" src="pix/rm.gif">';
-            break;
-        case DESCRIPTION:
-            echo '<img border="0" height="16" width="16" src="pix/de.gif">';
-            break;
-        case NUMERICAL:
-            echo '<img border="0" height="16" width="16" src="pix/nu.gif">';
-            break;
-        case MULTIANSWER:
-            echo '<img border="0" height="16" width="16" src="pix/mu.gif">';
-            break;
-    }
-    if ($editlink) {
-        echo "</a>\n";
-    }
-}
-
-function quiz_print_possible_question_image($quizid, $question) {
-// Includes the question image is there is one
-
-    global $CFG;
-
-    if ($question->image) {
-        echo '<img border="0" src="';
-
-        if (substr(strtolower($question->image), 0, 7) == 'http://') {
-            echo $question->image;
-
-        } else if ($CFG->slasharguments) {        // Use this method if possible for better caching
-            echo "$CFG->wwwroot/mod/quiz/quizfile.php/$quizid/$question->id/$question->image";
-
-        } else {
-            echo "$CFG->wwwroot/mod/quiz/quizfile.php?file=/$quizid/$question->id/$question->image";
+    // If we have instance information then we can just update the one event instead of updating all events.
+    if (isset($instance)) {
+        if (!is_object($instance)) {
+            $instance = $DB->get_record('quiz', array('id' => $instance), '*', MUST_EXIST);
         }
-        echo '" />';
-
-    }
-}
-
-function quiz_print_question($number, $question, $grade, $quizid, 
-                             $feedback=NULL, $response=NULL, $actualgrade=NULL, $correct=NULL,
-                             $realquestion=NULL, $shuffleanswers=false, $showgrades=true, $courseid=0) {
-
-/// Prints a quiz question, any format
-/// $question is provided as an object
-
-    global $CFG, $THEME;
-
-    $question->questiontextformat = isset($question->questiontextformat) ? $question->questiontextformat : NULL;
-
-    if ($question->qtype == DESCRIPTION) {  // Special case question - has no answers etc
-        echo '<p align="center">';
-        echo format_text($question->questiontext, $question->questiontextformat, NULL, $courseid);
-        quiz_print_possible_question_image($quizid, $question);
-        echo '</p>';
+        quiz_update_events($instance);
         return true;
     }
 
-    if (empty($actualgrade)) {
-        $actualgrade = 0;
-    }
-
-    $stranswer = get_string("answer", "quiz");
-    $strmarks  = get_string("marks", "quiz");
-
-    echo '<table width="100%" cellspacing="10">';
-    echo '<tr><td nowrap="nowrap" width="100" valign="top">';
-    echo '<p align="center"><b>' . $number . '</b></p>';
-    if ($showgrades) {
-        if ($feedback or $response) {
-            echo "<p align=\"center\"><font size=\"1\">$strmarks: $actualgrade/$grade</font></p>";
-        } else {
-            echo "<p align=\"center\"><font size=\"1\">$grade $strmarks</font></p>";
-        }
-    }
-    print_spacer(1,100);
-    
-    if (isset($question->recentlyadded) and $question->recentlyadded) {
-        echo '</td><td valign="top" align="right">';
-        // Notify the user of this recently added question
-        echo '<font color="red">';
-        echo get_string('recentlyaddedquestion', 'quiz');
-        echo '</font>';
-        echo '</td></tr><tr><td></td><td valign="top">';
-
-    } else { // The normal case
-        echo '</td><td valign="top">';
-    }
-
-
-    if (empty($realquestion)) { 
-        $realquestion->id = $question->id;
-    } else {    // Add a marker to connect this question to the actual random parent
-        echo "<input type=\"hidden\" name=\"q{$realquestion->id}rq$question->id\" value=\"x\" />\n";
-    }
-
-    switch ($question->qtype) {
-
-       case SHORTANSWER: 
-       case NUMERICAL:
-           echo format_text($question->questiontext, $question->questiontextformat, NULL, $courseid);
-           quiz_print_possible_question_image($quizid, $question);
-           if ($response) {
-               $value = 'value="'.s($response[0]).'"';
-           } else {
-               $value = '';
-           }
-           echo "<p align=\"right\">$stranswer: <input type=\"text\" name=\"q$realquestion->id\" size=\"80\" $value /></p>";
-           if ($feedback) {
-               quiz_print_comment("<p align=\"right\">$feedback[0]</p>");
-           }
-           if ($correct) {
-               $correctanswers = implode(", ", $correct);
-               quiz_print_correctanswer($correctanswers);
-           }
-           break;
-
-       case TRUEFALSE:
-           if (!$options = get_record("quiz_truefalse", "question", $question->id)) {
-               notify("Error: Missing question options!");
-           }
-           if (!$true = get_record("quiz_answers", "id", $options->trueanswer)) {
-               notify("Error: Missing question answers!");
-           }
-           if (!$false = get_record("quiz_answers", "id", $options->falseanswer)) {
-               notify("Error: Missing question answers!");
-           }
-           if (!$true->answer) {
-               $true->answer = get_string("true", "quiz");
-           }
-           if (!$false->answer) {
-               $false->answer = get_string("false", "quiz");
-           }
-           echo format_text($question->questiontext, $question->questiontextformat, NULL, $courseid);
-           quiz_print_possible_question_image($quizid, $question);
-
-           $truechecked = "";
-           $falsechecked = "";
-
-           if (!empty($response[$true->id])) {
-               $truechecked = 'checked="checked"';
-               $feedbackid = $true->id;
-           } else if (!empty($response[$false->id])) {
-               $falsechecked = 'checked="checked"';
-               $feedbackid = $false->id;
-           }
-
-           $truecorrect = "";
-           $falsecorrect = "";
-           if ($correct) {
-               if (!empty($correct[$true->id])) {
-                   $truecorrect = 'class="highlight"';
-               }
-               if (!empty($correct[$false->id])) {
-                   $falsecorrect = 'class="highlight"';
-               }
-           }
-           echo "<table align=\"right\" cellpadding=\"5\"><tr><td align=\"right\">$stranswer:&nbsp;&nbsp;";
-           echo "<td $truecorrect>";
-           echo "<input $truechecked type=\"radio\" name=\"q$realquestion->id\" value=\"$true->id\" />$true->answer";
-           echo "</td><td $falsecorrect>";
-           echo "<input $falsechecked type=\"radio\" name=\"q$realquestion->id\" value=\"$false->id\" />$false->answer";
-           echo "</td></tr></table><br clear=\"all\">";// changed from CLEAR=ALL jm
-           if ($feedback) {
-               quiz_print_comment("<p align=\"right\">$feedback[$feedbackid]</p>");
-           }
-
-           break;
-
-       case MULTICHOICE:
-           if (!$options = get_record("quiz_multichoice", "question", $question->id)) {
-               notify("Error: Missing question options!");
-           }
-           if (!$answers = get_records_list("quiz_answers", "id", $options->answers)) {
-               notify("Error: Missing question answers!");
-           }
-           echo format_text($question->questiontext, $question->questiontextformat, NULL, $courseid);
-           quiz_print_possible_question_image($quizid, $question);
-           echo "<table align=\"right\">";
-           echo "<tr><td valign=\"top\">$stranswer:&nbsp;&nbsp;</td><td>";
-           echo "<table>";
-           $answerids = explode(",", $options->answers);
-
-           if ($shuffleanswers) {
-               $answerids = swapshuffle($answerids);
-           }
-
-           foreach ($answerids as $key => $answerid) {
-               $answer = $answers[$answerid];
-               $qnumchar = chr(ord('a') + $key);
-
-               if (empty($response[$answerid])) {
-                   $checked = "";
-               } else {
-                   $checked = 'checked="checked"';
-               }
-               echo '<tr><td valign="top">';
-               if ($options->single) {
-                   echo "<input $checked type=\"radio\" name=\"q$realquestion->id\" value=\"$answer->id\" />";
-               } else {
-                   echo "<input $checked type=\"checkbox\" name=\"q$realquestion->id"."a$answer->id\" value=\"$answer->id\" />";
-               }
-               echo "</td>";
-               if (empty($feedback) or empty($correct[$answer->id])) {
-                   echo '<td valign="top">'.format_text("$qnumchar. $answer->answer").'</td>';
-               } else {
-                   echo '<td valign="top" class="highlight">'.format_text("$qnumchar. $answer->answer").'</td>';
-               }
-               if (!empty($feedback)) {
-                   echo "<td valign=\"top\">&nbsp;";
-                   if (!empty($response[$answerid])) {
-                       quiz_print_comment($feedback[$answerid]);
-                   }
-                   echo "</td>";
-               }
-               echo "</tr>";
-           }
-           echo "</table>";
-           echo "</td></tr></table>";
-           break;
-
-       case MATCH: 
-           if (!$options = get_record("quiz_match", "question", $question->id)) {
-               notify("Error: Missing question options!");
-           }
-           if (!$subquestions = get_records_list("quiz_match_sub", "id", $options->subquestions)) {
-               notify("Error: Missing subquestions for this question!");
-           }
-           if (!empty($question->questiontext)) {
-               echo format_text($question->questiontext, $question->questiontextformat, NULL, $courseid);
-           }
-           quiz_print_possible_question_image($quizid, $question);
-
-           if ($shuffleanswers) {
-               $subquestions = draw_rand_array($subquestions, count($subquestions));
-           }
-           foreach ($subquestions as $subquestion) {
-               $answers[$subquestion->id] = $subquestion->answertext;
-           }
-
-           $answers = draw_rand_array($answers, count($answers));
-
-           echo '<table border="0" cellpadding="10" align="right">';
-           foreach ($subquestions as $key => $subquestion) {
-               echo '<tr><td align="left" valign="top">';
-               echo $subquestion->questiontext;
-               echo '</td>';
-               if (empty($response)) {
-                   echo '<td align="right" valign="top">';
-                   choose_from_menu($answers, "q$realquestion->id"."r$subquestion->id");
-               } else {
-                   if (empty($response[$key])) {
-                       echo '<td align="right" valign="top">';
-                       choose_from_menu($answers, "q$realquestion->id"."r$subquestion->id");
-                   } else {
-                       if ($response[$key] == $correct[$key]) {
-                           echo '<td align="right" valign="top" class="highlight">';
-                           choose_from_menu($answers, "q$realquestion->id"."r$subquestion->id", $response[$key]);
-                       } else {
-                           echo '<td align="right" valign="top">';
-                           choose_from_menu($answers, "q$realquestion->id"."r$subquestion->id", $response[$key]);
-                       }
-                   }
-
-                   if (!empty($feedback[$key])) {
-                       quiz_print_comment($feedback[$key]);
-                   }
-               }
-               echo '</td></tr>';
-           }
-           echo '</table>';
-
-           break;
-
-       case RANDOMSAMATCH: 
-           if (!$options = get_record("quiz_randomsamatch", "question", $question->id)) {
-               notify("Error: Missing question options!");
-           }
-           echo format_text($question->questiontext, $question->questiontextformat, NULL, $courseid);
-           quiz_print_possible_question_image($quizid, $question);
-
-           /// First, get all the questions available
-
-           $allquestions = get_records_select("quiz_questions", 
-                                              "category = $question->category AND qtype = ".SHORTANSWER);
-           if (count($allquestions) < $options->choose) {
-               notify("Error: could not find enough Short Answer questions in the database!");
-               notify("Found ".count($allquestions).", need $options->choose.");
-               break;
-           }
-
-           if (empty($response)) {  // Randomly pick the questions
-               if (!$randomquestions = draw_rand_array($allquestions, $options->choose)) {
-                   notify("Error choosing $options->choose random questions");
-                   break;
-               }
-           } else {                 // Use existing questions
-               $randomquestions = array();
-               foreach ($response as $key => $rrr) {
-                   $rrr = explode("-", $rrr);
-                   $randomquestions[$key] = $allquestions[$key];
-                   $responseanswer[$key] = $rrr[1];
-               }
-           }
-    
-           /// For each selected, find the best matching answers
-
-           foreach ($randomquestions as $randomquestion) {
-               $shortanswerquestion = get_record("quiz_shortanswer", "question", $randomquestion->id);
-               $questionanswers = get_records_list("quiz_answers", "id", $shortanswerquestion->answers);
-               $bestfraction = 0;
-               $bestanswer = NULL;
-               foreach ($questionanswers as $questionanswer) {
-                   if ($questionanswer->fraction > $bestfraction) {
-                       $bestanswer = $questionanswer;
-                       $bestfraction = $questionanswer->fraction;
-                   }
-               }
-               if (empty($bestanswer)) {
-                   notify("Error: Could not find the best answer for question: ".$randomquestions->name);
-                   break;
-               }
-               $randomanswers[$bestanswer->id] = trim($bestanswer->answer);
-           }
-
-           if (!$randomanswers = draw_rand_array($randomanswers, $options->choose)) {  // Mix them up
-               notify("Error randomising answers!");
-               break;
-           }
-
-           echo '<table border="0" cellpadding="10">';
-           foreach ($randomquestions as $key => $randomquestion) {
-               echo '<tr><td align="left" valign="top">';
-               echo $randomquestion->questiontext;
-               echo '</td>';
-               echo '<td align="right" valign="top">';
-               if (empty($response)) {
-                   choose_from_menu($randomanswers, "q$realquestion->id"."r$randomquestion->id");
-               } else {
-                   if (!empty($correct[$key])) {
-                       if ($randomanswers[$responseanswer[$key]] == $correct[$key]) {
-                           echo '<span="highlight">';
-                           choose_from_menu($randomanswers, "q$realquestion->id"."r$randomquestion->id", $responseanswer[$key]);
-                           echo '</span><br />';
-                       } else {
-                           choose_from_menu($randomanswers, "q$realquestion->id"."r$randomquestion->id", $responseanswer[$key]);
-                           quiz_print_correctanswer($correct[$key]);
-                       }
-                   } else {
-                       choose_from_menu($randomanswers, "q$realquestion->id"."r$randomquestion->id", $responseanswer[$key]);
-                   }
-                   if (!empty($feedback[$key])) {
-                       quiz_print_comment($feedback[$key]);
-                   }
-               }
-               echo '</td></tr>';
-           }
-           echo '</table>';
-           break;
-
-       case MULTIANSWER:
-           // For this question type, we better print the image on top:
-           quiz_print_possible_question_image($quizid, $question);
-
-           $qtextremaining = format_text($question->questiontext, $question->questiontextformat, NULL, $courseid);
-
-           // The regex will recognize text snippets of type {#X} 
-           // where the X can be any text not containg } or white-space characters.
-
-           $strfeedback = get_string('feedback', 'quiz');
-
-           while (ereg('\{#([^[:space:]}]*)}', $qtextremaining, $regs)) {
-               $qtextsplits = explode($regs[0], $qtextremaining, 2);
-               echo $qtextsplits[0];
-               $qtextremaining = $qtextsplits[1];
-
-               $multianswer = get_record('quiz_multianswers', 'question', $question->id, 'positionkey', $regs[1]);
-
-               $inputname= " name=\"q{$realquestion->id}ma$multianswer->id\" ";
-
-               if (!empty($response) && ereg('(.[^-]*)-(.+)', array_shift($response), $responseitems)) {
-                   $responsefractiongrade = (float)$responseitems[1];
-                   $actualresponse = $responseitems[2];
-
-                   if (1.0 == $responsefractiongrade) {
-                       $style = 'style="background-color:lime"';
-                   } else if (0.0 < $responsefractiongrade) {
-                       $style = 'style="background-color:yellow"';
-                   } else if ('' != $actualresponse) {
-                       // The response must have been totally wrong:
-                       $style = 'style="background-color:red"';
-                   } else { 
-                       // There was no response given
-                       $style = '';
-                   }
-               } else {
-                   $responsefractiongrade = 0.0;
-                   $actualresponse = '';
-                   $style = '';
-               }
-
-               $feedbackitem = '';
-               switch ($multianswer->answertype) {
-                   case SHORTANSWER:
-                   case NUMERICAL:
-                       if (isset($feedback[$regs[1]-1])) {
-                           $title = str_replace("'", "\\'", $feedback[$regs[1]-1] );
-                           $popup = " onmouseover=\"return overlib('$title', CAPTION, '$strfeedback', FGCOLOR, '$THEME->cellcontent');\" ".
-                                    " onmouseout=\"return nd();\" ";
-                       } else {
-                           $popup = '';
-                       }
-                       echo " <input $style $popup $inputname value=\"$actualresponse\" type=\"text\" size=\"12\" /> ";
-                       break;
-                   case MULTICHOICE:
-                       $outputoptions = '';
-                       $answers = get_records_list("quiz_answers", "id", $multianswer->answers);
-                       $outputoptions .= '<option></option>'; // Default empty option 
-                       foreach ($answers as $answer) {
-                           if ($answer->id == $actualresponse) {
-                               $selected = 'selected';
-                               $feedbackitem = $answer->feedback;
-                           } else {
-                               $selected = '';
-                           }
-                           $outputoptions .= "<option value=\"$answer->id\" $selected>$answer->answer</option>";
-                       }
-                       if ($feedbackitem) {
-                           $title = str_replace("'", "\\'", $feedbackitem);
-                           $popup = " onmouseover=\"return overlib('$title', CAPTION, '$strfeedback', FGCOLOR, '$THEME->cellcontent');\" ".
-                                    " onmouseout=\"return nd();\" ";
-                       } else {
-                           $popup = '';
-                       }
-                       echo "<select $popup $style $inputname>";
-                       echo $outputoptions;
-                       echo '</select>';
-                       break;
-                   default:
-                       error("Unable to recognized answertype $answer->answertype");
-                       break;
-               }
-           }
-
-           // Print the final piece of question text:
-           echo $qtextremaining;
-           break;
-
-       case RANDOM:
-           // This can only happen if it is a recently added question
-
-           echo '<p>' . get_string('random', 'quiz') . '</p>';
-           break;
-
-       default: 
-           notify("Error: Unknown question type!");
-    }
-
-    echo "</td></tr></table>";
-}
-
-
-
-function quiz_print_quiz_questions($quiz, $results=NULL, $questions=NULL, $shuffleorder=NULL) {
-// Prints a whole quiz on one page.
-
-    /// Get the questions
-
-    if (!$questions) {
-        if (empty($quiz->questions)) {
-            notify("No questions have been defined!");
-            return false;
-        }
-
-        if (!$questions = get_records_list("quiz_questions", "id", $quiz->questions, "")) {
-            notify("Error when reading questions from the database!");
-            return false;
-        }
-    }
-
-    if (!$shuffleorder) {
-        if (!empty($quiz->shufflequestions)) {              // Mix everything up
-            $questions = swapshuffle_assoc($questions);
-        } else {
-            $shuffleorder = explode(",", $quiz->questions);  // Use originally defined order
-        }
-    }
-
-    if ($shuffleorder) {                             // Order has been defined, so reorder questions
-        $oldquestions = $questions;
-        $questions = array();
-        foreach ($shuffleorder as $key) {
-            if (empty($oldquestions[$key])) { // Check for recently added questions
-                if ($recentlyaddedquestion =
-                        get_record("quiz_questions", "id", $key)) {
-                    $recentlyaddedquestion->recentlyadded = true;
-                    $questions[] = $recentlyaddedquestion;
-                }
-            } else {
-                $questions[] = $oldquestions[$key];      // This loses the index key, but doesn't matter
-            }
-        }
-    }
-
-    if (!$grades = get_records_list("quiz_question_grades", "question", $quiz->questions, "", "question,grade")) {
-        notify("No grades were found for these questions!");
-        return false;
-    }
-
-
-    /// Examine the set of questions for random questions, and retrieve them 
-
-    if (empty($results)) {   // Choose some new random questions
-        if ($randomcats = quiz_get_random_categories($quiz->questions)) {
-            foreach ($randomcats as $randomcat => $randomdraw) {
-                /// Get the appropriate amount of random questions from this category
-                if (!$catquestions[$randomcat] = quiz_choose_random_questions($randomcat, $randomdraw, $quiz->questions)) {
-                    notify(get_string("toomanyrandom", "quiz", $randomcat));
-                    return false;
-                }
-            }
-        }
-    } else {                 // Get the previously chosen questions
-        $chosen = array();
-        foreach ($questions as $question) {
-            if (isset($question->random)) {
-                $chosen[] = $question->random;
-            }
-        }
-        if ($chosen) {
-            $chosenlist = implode(",", $chosen);
-            if (!$chosen = get_records_list("quiz_questions", "id", $chosenlist, "")) {
-                notify("Error when reading questions from the database!");
-                return false;
-            }
-        }
-    }
-
-    $strconfirmattempt = addslashes(get_string("readytosend", "quiz"));
-
-    if (empty($quiz->grade)) {
-        $onsubmit = "";
-    } else {
-        $onsubmit = "onsubmit=\"return confirm('$strconfirmattempt');\"";
-    }
-
-    echo "<form method=\"post\" action=\"attempt.php\" $onsubmit>\n";
-    echo "<input type=\"hidden\" name=\"q\" value=\"$quiz->id\" />\n";
-
-    $count = 0;
-    $questionorder = array();
-
-    foreach ($questions as $question) {
-
-        if ($question->qtype != DESCRIPTION) {    // Description questions are not counted
-            $count++;
-        }
-
-        $questionorder[] = $question->id;
-
-        $feedback       = NULL;
-        $response       = NULL;
-        $actualgrades   = NULL;
-        $correct        = NULL;
-        $randomquestion = NULL;
-
-        if (empty($results)) {
-            if ($question->qtype == RANDOM ) {   // Set up random questions
-                $randomquestion = $question;
-                $question = array_pop($catquestions[$randomquestion->category]);
-                $grades[$question->id]->grade = $grades[$randomquestion->id]->grade;
-            }
-        } else {
-            if (!empty($results->feedback[$question->id])) {
-                $feedback      = $results->feedback[$question->id];
-            }
-            if (!empty($results->response[$question->id])) {
-                $response      = $results->response[$question->id];
-            }
-            if (!empty($results->grades[$question->id])) {
-                $actualgrades  = $results->grades[$question->id];
-            }
-            if ($quiz->correctanswers) {
-                if (!empty($results->correct[$question->id])) {
-                    $correct   = $results->correct[$question->id];
-                }
-            }
-            if (!empty($question->random)) {
-                $randomquestion = $question;
-                $question = $chosen[$question->random];
-                $grades[$question->id]->grade = $grades[$randomquestion->id]->grade;
-            }
-        }
-
-        print_simple_box_start("center", "90%");
-        quiz_print_question($count, $question, $grades[$question->id]->grade, $quiz->id, 
-                            $feedback, $response, $actualgrades, $correct, 
-                            $randomquestion, $quiz->shuffleanswers, $quiz->grade, $quiz->course);
-        print_simple_box_end();
-        echo "<br />";
-    }
-
-    $attemptbuildsonthelast = isset($results->attemptbuildsonthelast) ? $results->attemptbuildsonthelast : NULL;
-
-    if (empty($results) || $attemptbuildsonthelast) {
-        if (!empty($quiz->shufflequestions)) {  // Things have been mixed up, so pass the question order
-            $shuffleorder = implode(',', $questionorder);
-            echo "<input type=\"hidden\" name=\"shuffleorder\" value=\"$shuffleorder\" />\n";
-        }
-        echo "<center>\n<input type=\"submit\" value=\"".get_string("savemyanswers", "quiz")."\" />\n</center>";
-    }
-    echo "</form>";
-
-    return true;
-}
-
-
- 
-function quiz_get_default_category($courseid) {
-/// Returns the current category
-
-    if ($categories = get_records("quiz_categories", "course", $courseid, "id")) {
-        foreach ($categories as $category) {
-            return $category;   // Return the first one (lowest id)
-        }
-    }
-
-    // Otherwise, we need to make one
-    $category->name = get_string("default", "quiz");
-    $category->info = get_string("defaultinfo", "quiz");
-    $category->course = $courseid;
-    $category->publish = 0;
-    $category->stamp = make_unique_id_code();
-
-    if (!$category->id = insert_record("quiz_categories", $category)) {
-        notify("Error creating a default category!");
-        return false;
-    }
-    return $category;
-}
-
-function quiz_get_category_menu($courseid, $published=false) {
-/// Returns the list of categories
-    $publish = "";
-    if ($published) {
-        $publish = "OR publish = '1'";
-    }
-    return get_records_select_menu("quiz_categories", "course='$courseid' $publish", "name ASC", "id,name");
-}
-
-function quiz_print_category_form($course, $current) {
-// Prints a form to choose categories
-
-    if (!$categories = get_records_select("quiz_categories", "course = '$course->id' OR publish = '1'", "name ASC")) {
-        if (!$category = quiz_get_default_category($course->id)) {
-            notify("Error creating a default category!");
-            return false;
-        }
-        $categories[$category->id] = $category;
-    }
-    foreach ($categories as $key => $category) {
-       if ($catcourse = get_record("course", "id", $category->course)) {
-           if ($category->publish) {
-               $category->name .= " ($catcourse->shortname)";
-           }
-           $catmenu[$category->id] = $category->name;
-       }
-    }
-    $strcategory = get_string("category", "quiz");
-    $strshow = get_string("show", "quiz");
-    $streditcats = get_string("editcategories", "quiz");
-
-    echo "<table width=\"100%\"><tr><td width=\"20\" nowrap=\"nowrap\">";
-    echo "<b>$strcategory:</b>&nbsp;";
-    echo "</td><td>";
-    popup_form ("edit.php?cat=", $catmenu, "catmenu", $current, "choose", "", "", false, "self");
-    echo "</td><td align=\"right\">";
-    echo "<form method=\"get\" action=\"category.php\">"; 
-    echo "<input type=\"hidden\" name=\"id\" value=\"$course->id\" />";
-    echo "<input type=\"submit\" value=\"$streditcats\" />";
-    echo "</form>";
-    echo "</td></tr></table>";
-}
-
-
-
-function quiz_choose_random_questions($category, $draws, $excluded=0) {
-/// Given a question category and a number of draws, this function
-/// creates a random subset of that size - returned as an array of questions
-
-    if (!$pool = get_records_select_menu("quiz_questions", 
-                "category = '$category' AND id NOT IN ($excluded) 
-                                        AND qtype <> ".RANDOM." 
-                                        AND qtype <> ".DESCRIPTION, 
-                                        "", "id,qtype")) {
-        return false;
-    }
-
-    $countpool = count($pool);
-
-    if ($countpool == $draws) {
-        $chosen = $pool;
-    } else if ($countpool < $draws) {
-        return false;
-    } else {
-        $chosen = draw_rand_array($pool, $draws);
-    }
-
-    $chosenlist = implode(",", array_keys($chosen));
-    return get_records_list("quiz_questions", "id", $chosenlist);
-}
-
-
-function quiz_get_all_question_grades($questionlist, $quizid) {
-// Given a list of question IDs, finds grades or invents them to 
-// create an array of matching grades
-
-    if (empty($questionlist)) {
-        return array();
-    }
-
-    $questions = quiz_get_question_grades($quizid, $questionlist);
-
-    $list = explode(",", $questionlist);
-    $grades = array();
-
-    foreach ($list as $qid) {
-        if (isset($questions[$qid])) {
-            $grades[$qid] = $questions[$qid]->grade;
-        } else {
-            $grades[$qid] = 1;
-        }
-    }
-    return $grades;
-}
-
-function quiz_gradesmenu_options($defaultgrade) {
-// Especially for multianswer questions it is often
-// desirable to have the grade of the question in a quiz
-// larger than the earlier maximum of 10 points.
-// This function makes quiz question list grade selector drop-down
-// have the maximum grade option set to the highest value between 10
-// and the defaultgrade of the question.
-
-    if ($defaultgrade && $defaultgrade>10) {
-        $maxgrade = $defaultgrade;
-    } else {
-        $maxgrade = 10;
-    }
-
-    unset($gradesmenu);
-    for ($i=$maxgrade ; $i>=0 ; --$i) {
-        $gradesmenu[$i] = $i;
-    }
-    return $gradesmenu;
-}
-
-function quiz_print_question_list($questionlist, $grades) {
-// Prints a list of quiz questions in a small layout form with knobs
-// $questionlist is comma-separated list
-// $grades is an array of corresponding grades
-
-    global $THEME;
-
-    if (!$questionlist) {
-        echo "<p align=\"center\">";
-        print_string("noquestions", "quiz");
-        echo "</p>";
-        return;
-    }
-
-    $order = explode(",", $questionlist);
-
-    if (!$questions = get_list_of_questions($questionlist)) {
-        echo "<p align=\"center\">";
-        print_string("noquestions", "quiz");
-        echo "</p>";
-        return;
-
-    }
-
-    $strorder = get_string("order");
-    $strquestionname = get_string("questionname", "quiz");
-    $strgrade = get_string("grade");
-    $strdelete = get_string("delete");
-    $stredit = get_string("edit");
-    $strmoveup = get_string("moveup");
-    $strmovedown = get_string("movedown");
-    $strsavegrades = get_string("savegrades", "quiz");
-    $strtype = get_string("type", "quiz");
-
-    $count = 0;
-    $sumgrade = 0;
-    $total = count($order);
-    echo "<form method=\"post\" action=\"edit.php\">";
-    echo "<table border=\"0\" cellpadding=\"5\" cellspacing=\"2\" width=\"100%\">\n";
-    echo "<tr><th width=\"*\" colspan=\"3\" nowrap=\"nowrap\">$strorder</th><th align=\"left\" width=\"100%\" nowrap=\"nowrap\">$strquestionname</th><th width=\"*\" nowrap=\"nowrap\">$strtype</th><th width=\"*\" nowrap=\"nowrap\">$strgrade</th><th width=\"*\" nowrap=\"nowrap\">$stredit</th></tr>\n";
-    foreach ($order as $qnum) {
-        if (empty($questions[$qnum])) {
-            continue;
-        }
-        $question = $questions[$qnum];
-        $canedit = isteacheredit($question->course);
-        $count++;
-        echo "<tr bgcolor=\"$THEME->cellcontent\">";
-        echo "<td>$count</td>";
-        echo "<td>";
-        if ($count != 1) {
-            echo "<a title=\"$strmoveup\" href=\"edit.php?up=$qnum\"><img 
-                 src=\"../../pix/t/up.gif\" border=\"0\"></a>";
-        }
-        echo "</td>";
-        echo "<td>";
-        if ($count != $total) {
-            echo "<a title=\"$strmovedown\" href=\"edit.php?down=$qnum\"><img 
-                 src=\"../../pix/t/down.gif\" border=\"0\"></a>";
-        }
-        echo "</td>";
-        echo "<td>$question->name</td>";
-        echo "<td align=\"center\">";
-        quiz_print_question_icon($question, $canedit);
-        echo "</td>";
-        echo "<td>";
-        if ($question->qtype == DESCRIPTION) {
-            echo "<input type=\"hidden\" name=\"q$qnum\" value=\"0\" /> \n";
-        } else {
-            choose_from_menu(quiz_gradesmenu_options($question->defaultgrade),
-                             "q$qnum", (string)$grades[$qnum], "");
-        }
-        echo "<td>";
-            echo "<a title=\"$strdelete\" href=\"edit.php?delete=$qnum\"><img 
-                 src=\"../../pix/t/delete.gif\" border=\"0\"></a>&nbsp;";
-            if ($canedit) {
-                echo "<a title=\"$stredit\" href=\"question.php?id=$qnum\"><img 
-                     src=\"../../pix/t/edit.gif\" border=\"0\"></a>\n";
-            }
-        echo "</td>";
-
-        $sumgrade += $grades[$qnum];
-    }
-    echo "<tr><td colspan=5 align=\"right\">\n";
-    echo "<input type=\"submit\" value=\"$strsavegrades:\" />\n";
-    echo "<input type=\"hidden\" name=\"setgrades\" value=\"save\" />\n";
-    echo "<td align=\"left\" bgcolor=\"$THEME->cellcontent\">\n";
-    echo "<b>$sumgrade</b>";
-    echo "</td><td>\n</td></tr>\n";
-    echo "</table>\n";
-    echo "</form>\n";
-
-    return $sumgrade;
-}
-
-
-function quiz_print_cat_question_list($categoryid, $quizselected=true) {
-// Prints a form to choose categories
-
-    global $THEME, $QUIZ_QUESTION_TYPE;
-
-    $strcategory = get_string("category", "quiz");
-    $strquestion = get_string("question", "quiz");
-    $straddquestions = get_string("addquestions", "quiz");
-    $strimportquestions = get_string("importquestions", "quiz");
-    $strnoquestions = get_string("noquestions", "quiz");
-    $strselect = get_string("select", "quiz");
-    $strselectall = get_string("selectall", "quiz");
-    $strcreatenewquestion = get_string("createnewquestion", "quiz");
-    $strquestionname = get_string("questionname", "quiz");
-    $strdelete = get_string("delete");
-    $stredit = get_string("edit");
-    $straddselectedtoquiz = get_string("addselectedtoquiz", "quiz");
-    $strtype = get_string("type", "quiz");
-    $strcreatemultiple = get_string("createmultiple", "quiz");
-
-    if (!$categoryid) {
-        echo "<p align=\"center\"><b>";
-        print_string("selectcategoryabove", "quiz");
-        echo "</b></p>";
-        if ($quizselected) {
-            echo "<p>";
-            print_string("addingquestions", "quiz");
-            echo "</p>";
-        }
-        return;
-    }
-
-    if (!$category = get_record("quiz_categories", "id", "$categoryid")) {
-        notify("Category not found!");
-        return;
-    }
-    echo "<center>";
-    echo format_text($category->info, FORMAT_MOODLE);
-
-    echo '<table><tr>';
-    echo "<td valign=\"top\"><b>$strcreatenewquestion:</b></td>";
-    echo '<td valign="top" align="right">';
-    popup_form ("question.php?category=$category->id&qtype=", $QUIZ_QUESTION_TYPE, "addquestion", 
-                "", "choose", "", "", false, "self");
-    echo '<td width="10" valign="top" align="right">';
-    helpbutton("questiontypes", $strcreatenewquestion, "quiz");
-    echo '</td></tr>';
-
-    echo '<tr><td colspan="3" align="right">';
-    echo '<form method="get" action="import.php">'; 
-    echo "<input type=\"hidden\" name=\"category\" value=\"$category->id\" />";
-    echo "<input type=\"submit\" value=\"$strimportquestions\" />";
-    helpbutton("import", $strimportquestions, "quiz");
-    echo '</form>';
-    echo '</td></tr>';
-
-    echo '<tr><td colspan="3" align="right">';
-    echo '<form method="get" action="multiple.php">'; 
-    echo "<input type=\"hidden\" name=\"category\" value=\"$category->id\" />";
-    echo "<input type=\"submit\" value=\"$strcreatemultiple\" />";
-    helpbutton("createmultiple", $strcreatemultiple, "quiz");
-    echo '</form>';
-    echo '</td></tr>';
-
-    echo '</table>';
-
-    echo '</center>';
-
-    if (!$questions = get_records("quiz_questions", "category", $category->id, "qtype ASC")) {
-        echo "<p align=\"center\">";
-        print_string("noquestions", "quiz");
-        echo "</p>";
-        return;
-    }
-
-    $canedit = isteacheredit($category->course);
-
-    echo "<form method=\"post\" action=\"edit.php\">";
-    echo "<table border=\"0\" cellpadding=\"5\" cellspacing=\"2\" width=\"100%\">";
-    echo "<tr>";
-    if ($quizselected) {
-        echo "<th width=\"*\" nowrap=\"nowrap\">$strselect</th>";
-    }
-    echo "<th width=\"100%\" align=\"left\" nowrap=\"nowrap\">$strquestionname</th><th width=\"*\" nowrap=\"nowrap\">$strtype</th>";
-    if ($canedit) {
-        echo "<th width=\"*\" nowrap=\"nowrap\">$stredit</th>";
-    }
-    echo "</tr>\n";
-    foreach ($questions as $question) {
-        echo "<tr bgcolor=\"$THEME->cellcontent\">\n";
-        if ($quizselected) {
-            echo "<td align=\"center\">";
-            echo "<input type=\"checkbox\" name=\"q$question->id\" value=\"1\" />\n";
-            echo "</td>";
-        }
-        echo "<td>".$question->name."</td>\n";
-        echo "<td align=\"center\">\n";
-        quiz_print_question_icon($question, $canedit);
-        echo "</td>\n";
-        if ($canedit) {
-            echo "<td>\n";
-                echo "<a title=\"$strdelete\" href=\"question.php?id=$question->id&delete=$question->id\">\n<img 
-                     src=\"../../pix/t/delete.gif\" border=0></a>&nbsp;";
-                echo "<a title=\"$stredit\" href=\"question.php?id=$question->id\"><img 
-                     src=\"../../pix/t/edit.gif\" border=0></a>";
-            echo "</td>\n";// deleted </tr> jm
-        }
-        echo "</tr>\n";
-    }
-    if ($quizselected) {
-        echo "<tr>\n<td colspan=\"3\">";
-        echo "<input type=\"submit\" name=\"add\" value=\"<< $straddselectedtoquiz\" />\n";
-        //echo "<input type=submit name=\"delete\" value=\"XX Delete selected\">";
-        echo "<input type=\"button\" onclick=\"checkall()\" value=\"$strselectall\" />\n";
-        echo "</td></tr>";
-    }
-    echo "</table>\n";
-    echo "</form>\n";
-}
-
-
-function quiz_start_attempt($quizid, $userid, $numattempt) {
-    $attempt->quiz = $quizid;
-    $attempt->userid = $userid;
-    $attempt->attempt = $numattempt;
-    $attempt->timestart = time();
-    $attempt->timefinish = 0; 
-    $attempt->timemodified = time();
-
-    return insert_record("quiz_attempts", $attempt);
-}
-
-function quiz_get_user_attempt_unfinished($quizid, $userid) {
-// Returns an object containing an unfinished attempt (if there is one)
-    return get_record("quiz_attempts", "quiz", $quizid, "userid", $userid, "timefinish", 0);
-}
-
-function quiz_get_user_attempts($quizid, $userid) {
-// Returns a list of all attempts by a user
-    return get_records_select("quiz_attempts", "quiz = '$quizid' AND userid = '$userid' AND timefinish > 0", 
-                              "attempt ASC");
-}
-
-
-function quiz_get_user_attempts_string($quiz, $attempts, $bestgrade) {
-/// Returns a simple little comma-separated list of all attempts, 
-/// with each grade linked to the feedback report and with the best grade highlighted
-
-    $bestgrade = format_float($bestgrade);
-    foreach ($attempts as $attempt) {
-        $attemptgrade = format_float(($attempt->sumgrades / $quiz->sumgrades) * $quiz->grade);
-        if ($attemptgrade == $bestgrade) {
-            $userattempts[] = "<span class=\"highlight\"><a href=\"review.php?q=$quiz->id&attempt=$attempt->id\">$attemptgrade</a></span>";
-        } else {
-            $userattempts[] = "<a href=\"review.php?q=$quiz->id&attempt=$attempt->id\">$attemptgrade</a>";
-        }
-    }
-    return implode(",", $userattempts);
-}
-
-function quiz_get_best_grade($quizid, $userid) {
-/// Get the best current grade for a particular user in a quiz
-    if (!$grade = get_record("quiz_grades", "quiz", $quizid, "userid", $userid)) {
-        return "";
-    }
-
-    return (round($grade->grade,0));
-}
-
-function quiz_save_best_grade($quiz, $userid) {
-/// Calculates the best grade out of all attempts at a quiz for a user,
-/// and then saves that grade in the quiz_grades table.
-
-    if (!$attempts = quiz_get_user_attempts($quiz->id, $userid)) {
-        notify("Could not find any user attempts");
-        return false;
-    }
-
-    $bestgrade = quiz_calculate_best_grade($quiz, $attempts);
-    $bestgrade = (($bestgrade / $quiz->sumgrades) * $quiz->grade);
-
-    if ($grade = get_record("quiz_grades", "quiz", $quiz->id, "userid", $userid)) {
-        $grade->grade = round($bestgrade, 2);
-        $grade->timemodified = time();
-        if (!update_record("quiz_grades", $grade)) {
-            notify("Could not update best grade");
-            return false;
+    if ($courseid == 0) {
+        if (!$quizzes = $DB->get_records('quiz')) {
+            return true;
         }
     } else {
-        $grade->quiz = $quiz->id;
-        $grade->userid = $userid;
-        $grade->grade = round($bestgrade, 2);
-        $grade->timemodified = time();
-        if (!insert_record("quiz_grades", $grade)) {
-            notify("Could not insert new best grade");
-            return false;
+        if (!$quizzes = $DB->get_records('quiz', array('course' => $courseid))) {
+            return true;
         }
     }
-    return true;
-}
-
-
-function quiz_calculate_best_grade($quiz, $attempts) {
-/// Calculate the best grade for a quiz given a number of attempts by a particular user.
-
-    switch ($quiz->grademethod) {
-
-        case ATTEMPTFIRST:
-            foreach ($attempts as $attempt) {
-                return $attempt->sumgrades;
-            }
-            break;
-
-        case ATTEMPTLAST:
-            foreach ($attempts as $attempt) {
-                $final = $attempt->sumgrades;
-            }
-            return $final;
-
-        case GRADEAVERAGE:
-            $sum = 0;
-            $count = 0;
-            foreach ($attempts as $attempt) {
-                $sum += $attempt->sumgrades;
-                $count++;
-            }
-            return (float)$sum/$count;
-
-        default:
-        case GRADEHIGHEST:
-            $max = 0;
-            foreach ($attempts as $attempt) {
-                if ($attempt->sumgrades > $max) {
-                    $max = $attempt->sumgrades;
-                }
-            }
-            return $max;
-    }
-}
-
-
-function quiz_calculate_best_attempt($quiz, $attempts) {
-/// Return the attempt with the best grade for a quiz
-
-    switch ($quiz->grademethod) {
-
-        case ATTEMPTFIRST:
-            foreach ($attempts as $attempt) {
-                return $attempt;
-            }
-            break;
-
-        case GRADEAVERAGE: // need to do something with it :-)
-        case ATTEMPTLAST:
-            foreach ($attempts as $attempt) {
-                $final = $attempt;
-            }
-            return $final;
-
-        default:
-        case GRADEHIGHEST:
-            $max = -1;
-            foreach ($attempts as $attempt) {
-                if ($attempt->sumgrades > $max) {
-                    $max = $attempt->sumgrades;
-                    $maxattempt = $attempt;
-                }
-            }
-            return $maxattempt;
-    }
-}
-
-
-function quiz_save_attempt($quiz, $questions, $result, $attemptnum) {
-/// Given a quiz, a list of attempted questions and a total grade 
-/// this function saves EVERYTHING so it can be reconstructed later
-/// if necessary.
-
-    global $USER;
-
-    // First find the attempt in the database (start of attempt)
-
-    if (!$attempt = quiz_get_user_attempt_unfinished($quiz->id, $USER->id)) {
-        notify("Trying to save an attempt that was not started!");
-        return false;
-    }
-
-    // Not usually necessary, but there's some sort of very rare glitch 
-    // I've seen where the number wasn't already the same.  In these cases
-    // We upgrade the database to match the attemptnum we calculated
-    $attempt->attempt = $attemptnum;
-                      
-    // Now let's complete this record and save it
-    $attempt->sumgrades = $result->sumgrades;
-    $attempt->timefinish = time();
-    $attempt->timemodified = time();
-
-    if (! update_record("quiz_attempts", $attempt)) {
-        notify("Error while saving attempt");
-        return false;
-    }
-
-    // Now let's save all the questions for this attempt
-
-    foreach ($questions as $question) {
-        $response->attempt = $attempt->id;
-        $response->question = $question->id;
-        $response->grade = $result->grades[$question->id];
-
-        if (!empty($question->random)) {
-            // First save the response of the random question
-            // the answer is the id of the REAL response
-            $response->answer = $question->random;
-            if (!insert_record("quiz_responses", $response)) {
-                notify("Error while saving response");
-                return false;
-            }
-            $response->question = $question->random;
-        }
-
-        if (!empty($question->answer)) {
-            $response->answer = implode(",",$question->answer);
-        } else {
-            $response->answer = "";
-        }
-        if (!insert_record("quiz_responses", $response)) {
-            notify("Error while saving response");
-            return false;
-        }
-    }
-    return $attempt;
-}
-
-function quiz_grade_attempt_question_result($question,
-                                            $answers,
-                                            $gradecanbenegative= false)
-{
-    $grade    = 0;   // default
-    $correct  = array();
-    $feedback = array();
-    $response = array();
-
-    switch ($question->qtype) {
-        case SHORTANSWER:
-            if ($question->answer) {
-                $question->answer = trim(stripslashes($question->answer[0]));
-            } else {
-                $question->answer = "";
-            }
-            $response[0] = $question->answer;
-            $feedback[0] = '';  // Default
-            foreach ($answers as $answer) {  // There might be multiple right answers
-
-                $answer->answer = trim($answer->answer);  // Just in case
-
-                if ($answer->fraction >= 1.0) {
-                    $correct[] = $answer->answer;
-                }
-                if (!$answer->usecase) {       // Don't compare case
-                    $answer->answer = moodle_strtolower($answer->answer);
-                    $question->answer = moodle_strtolower($question->answer);
-                }
-
-                $potentialgrade = (float)$answer->fraction * $question->grade;
-
-                if ($potentialgrade >= $grade) {
-                    if ((strpos(' '.$answer->answer, '*'))) {
-                        $search = array('\\', '+', '(', ')', '[', ']', '-');
-                        $replace = array('\\\\', '\+', '\(', '\)', '\[', '\]', '\-');
-    
-                        $answer->answer = str_replace('\*','@@@@@@',$answer->answer);
-                        $answer->answer = str_replace('*','.*',$answer->answer);
-                        
-                        $answer->answer = str_replace($search, $replace, $answer->answer);
-
-                        $answer->answer = str_replace('@@@@@@', '\*',$answer->answer);
-                        
-                        if (eregi('^'.$answer->answer.'$', $question->answer)) {
-                            $feedback[0] = $answer->feedback;
-                            $grade = $potentialgrade;
-                        }
-
-                    } else if ($answer->answer == $question->answer) {
-                        $feedback[0] = $answer->feedback;
-                        $grade = $potentialgrade;
-                    }
-                }
-            }
-
-            break;
-
-        case NUMERICAL:
-            if ($question->answer) {
-                $question->answer = trim(stripslashes($question->answer[0]));
-            } else {
-                $question->answer = "";
-            }
-            $response[0] = $question->answer;
-            $bestshortanswer = 0;
-            foreach ($answers as $answer) {  // There might be multiple right answers
-                if ($answer->fraction > $bestshortanswer) {
-                    $correct[$answer->id] = $answer->answer;
-                    $bestshortanswer = $answer->fraction;
-                    $feedback[0] = $answer->feedback;  // Show feedback for best answer
-                }
-                if ('' != $question->answer           // Must not be mixed up with zero!
-                    && (float)$answer->fraction > (float)$grade // Do we need to bother?
-                    and                      // and has lower procedence than && and ||.
-                    strtolower($question->answer) == strtolower($answer->answer)
-                    || '' != trim($answer->min) 
-                    && ((float)$question->answer >= (float)$answer->min)
-                    && ((float)$question->answer <= (float)$answer->max))
-                {
-                    //$feedback[0] = $answer->feedback;  No feedback was shown for wrong answers
-                    $grade = (float)$answer->fraction;
-                }
-            }
-            $grade *= $question->grade; // Normalize to correct weight
-            break;
-
-        case TRUEFALSE:
-            if ($question->answer) {
-                $question->answer = $question->answer[0];
-            } else {
-                $question->answer = NULL;
-            }
-            foreach($answers as $answer) {  // There should be two answers (true and false)
-                $feedback[$answer->id] = $answer->feedback;
-                if ($answer->fraction > 0) {
-                    $correct[$answer->id]  = true;
-                }
-                if ($question->answer == $answer->id) {
-                    $grade = (float)$answer->fraction * $question->grade;
-                    $response[$answer->id] = true;
-                }
-            }
-            break;
-
-
-        case MULTICHOICE:
-            foreach($answers as $answer) {  // There will be multiple answers, perhaps more than one is right
-                $feedback[$answer->id] = $answer->feedback;
-                if ($answer->fraction > 0) {
-                    $correct[$answer->id] = true;
-                }
-                if (!empty($question->answer)) {
-                    foreach ($question->answer as $questionanswer) {
-                        if ($questionanswer == $answer->id) {
-                            $response[$answer->id] = true;
-                            if ($answer->single) {
-                                $grade = (float)$answer->fraction * $question->grade;
-                                continue;
-                            } else {
-                                $grade += (float)$answer->fraction * $question->grade;
-                            }
-                        }
-                    }
-                }
-            }
-            break;
-
-        case MATCH:
-            $matchcount = $totalcount = 0;
-
-            foreach ($question->answer as $questionanswer) {  // Each answer is "subquestionid-answerid"
-                $totalcount++;
-                $qarr = explode('-', $questionanswer);        // Extract subquestion/answer.
-                $subquestionid = $qarr[0];
-                $subanswerid = $qarr[1];
-                if ($subquestionid and $subanswerid and (($subquestionid == $subanswerid) or 
-                    ($answers[$subquestionid]->answertext == $answers[$subanswerid]->answertext))) {   
-                    // Either the ids match exactly, or the answertexts match exactly 
-                    // (in case two subquestions had the same answer)
-                    $matchcount++;
-                    $correct[$subquestionid] = true;
-                } else {
-                    $correct[$subquestionid] = false;
-                }
-                $response[$subquestionid] = $subanswerid;
-            }
-
-            $grade = $question->grade * $matchcount / $totalcount;
-
-            break;
-
-        case RANDOMSAMATCH:
-            $bestanswer = array();
-            foreach ($answers as $answer) {  // Loop through them all looking for correct answers
-                if (empty($bestanswer[$answer->question])) {
-                    $bestanswer[$answer->question] = 0;
-                    $correct[$answer->question] = "";
-                }
-                if ($answer->fraction > $bestanswer[$answer->question]) {
-                    $bestanswer[$answer->question] = $answer->fraction;
-                    $correct[$answer->question] = $answer->answer;
-                }
-            }
-            $answerfraction = 1.0 / (float) count($question->answer);
-            foreach ($question->answer as $questionanswer) {  // For each random answered question
-                $rqarr = explode('-', $questionanswer);   // Extract question/answer.
-                $rquestion = $rqarr[0];
-                $ranswer = $rqarr[1];
-                $response[$rquestion] = $questionanswer;
-                if (isset($answers[$ranswer])) {         // If the answer exists in the list
-                    $answer = $answers[$ranswer];         
-                    $feedback[$rquestion] = $answer->feedback;
-                    if ($answer->question == $rquestion) {    // Check that this answer matches the question
-                        $grade += (float)$answer->fraction * $question->grade * $answerfraction;
-                    }
-                }
-            }
-            break;
-
-        case MULTIANSWER:
-            // Default setting that avoids a possible divide by zero:
-            $subquestion->grade = 1.0;
-
-            foreach ($question->answer as $questionanswer) {
-                
-                // Resetting default values for subresult:
-                $subresult->grade = 0.0;
-                $subresult->correct = array();
-                $subresult->feedback = array();
-
-                // Resetting subquestion responses:
-                $subquestion->answer = array();
-
-                $qarr = explode('-', $questionanswer, 2);
-                $subquestion->answer[] = $qarr[1];  // Always single answer for subquestions
-                foreach ($answers as $multianswer) {
-                    if ($multianswer->id == $qarr[0]) {
-                        $subquestion->qtype = $multianswer->answertype;
-                        $subquestion->grade = $multianswer->norm;
-                        $subresult = quiz_grade_attempt_question_result($subquestion, $multianswer->subanswers, true);
-                        break;
-                    }
-                }
-
-
-                // Summarize subquestion results:
-                $grade += $subresult->grade;
-                $feedback[] = $subresult->feedback[0];
-                $correct[]  = $subresult->correct[0];
-
-                // Each response instance also contains the partial
-                // fraction grade for the response:
-                $response[] = $subresult->grade/$subquestion->grade
-                              . '-' . $subquestion->answer[0];
-            }
-            // Normalize grade:
-            $grade *= $question->grade/($question->defaultgrade);
-            break;
-
-        case DESCRIPTION:  // Descriptions are not graded.
-            break;
-
-        case RANDOM:   // Returns a recursive call with the real question
-            $realquestion = get_record
-                    ('quiz_questions', 'id', $question->random);
-            $realquestion->answer = $question->answer;
-            $realquestion->grade = $question->grade;
-            return quiz_grade_attempt_question_result($realquestion, $answers);
-    }
-
-    $result->grade =
-            $gradecanbenegative ? $grade            // Grade can be negative
-                                : max(0.0, $grade); // Grade must not be negative
-    $result->correct = $correct;
-    $result->feedback = $feedback;
-    $result->response = $response;
-    return $result;
-}
-
-function quiz_grade_attempt_results($quiz, $questions) {
-/// Given a list of questions (including answers for each one)
-/// this function does all the hard work of calculating the 
-/// grades for each question, as well as a total grade for 
-/// for the whole quiz.  It returns everything in a structure 
-/// that looks like:
-/// $result->sumgrades    (sum of all grades for all questions)
-/// $result->percentage   (Percentage of grades that were correct)
-/// $result->grade        (final grade result for the whole quiz)
-/// $result->grades[]     (array of grades, indexed by question id)
-/// $result->response[]   (array of response arrays, indexed by question id)
-/// $result->feedback[]   (array of feedback arrays, indexed by question id)
-/// $result->correct[]    (array of feedback arrays, indexed by question id)
-
-    if (!$questions) {
-        error("No questions!");
-    }
-
-    if (!$grades = get_records_menu("quiz_question_grades", "quiz", $quiz->id, "", "question,grade")) {
-        error("No grades defined for these quiz questions!");
-    }
-
-    $result->sumgrades = 0;
-
-    foreach ($questions as $question) {
-
-        $question->grade = $grades[$question->id];
-        
-        if (!$answers = quiz_get_answers($question)) {
-            notify("No answers defined for question id $question->id!");
-            continue;
-        }
-
-        $questionresult = quiz_grade_attempt_question_result($question,
-                                                             $answers);
-
-        $result->grades[$question->id] = round($questionresult->grade, 2);
-        $result->sumgrades += $questionresult->grade;
-        $result->feedback[$question->id] = $questionresult->feedback;
-        $result->response[$question->id] = $questionresult->response;
-        $result->correct[$question->id] = $questionresult->correct;
-    }
-
-    $fraction = (float)($result->sumgrades / $quiz->sumgrades);
-    $result->percentage = format_float($fraction * 100.0);
-    $result->grade      = format_float($fraction * $quiz->grade);
-    $result->sumgrades = round($result->sumgrades, 2);
-
-    return $result;
-}
-
-
-function quiz_save_question_options($question) {
-/// Given some question info and some data about the the answers
-/// this function parses, organises and saves the question
-/// It is used by question.php when saving new data from a 
-/// form, and also by import.php when importing questions
-/// 
-/// If this is an update, and old answers already exist, then
-/// these are overwritten using an update().  To do this, it 
-/// it is assumed that the IDs in quiz_answers are in the same
-/// sort order as the new answers being saved.  This should always
-/// be true, but it's something to keep in mind if fiddling with
-/// question.php
-///
-/// Returns $result->error or $result->noticeyesno or $result->notice
-    
-    switch ($question->qtype) {
-        case SHORTANSWER:
-
-            if (!$oldanswers = get_records("quiz_answers", "question", $question->id, "id ASC")) {
-                $oldanswers = array();
-            }
-
-            $answers = array();
-            $maxfraction = -1;
-
-            // Insert all the new answers
-            foreach ($question->answer as $key => $dataanswer) {
-                if ($dataanswer != "") {
-                    if ($oldanswer = array_shift($oldanswers)) {  // Existing answer, so reuse it
-                        $answer = $oldanswer;
-                        $answer->answer   = trim($dataanswer);
-                        $answer->fraction = $question->fraction[$key];
-                        $answer->feedback = $question->feedback[$key];
-                        if (!update_record("quiz_answers", $answer)) {
-                            $result->error = "Could not update quiz answer! (id=$answer->id)";
-                            return $result;
-                        }
-                    } else {    // This is a completely new answer
-                        unset($answer);
-                        $answer->answer   = trim($dataanswer);
-                        $answer->question = $question->id;
-                        $answer->fraction = $question->fraction[$key];
-                        $answer->feedback = $question->feedback[$key];
-                        if (!$answer->id = insert_record("quiz_answers", $answer)) {
-                            $result->error = "Could not insert quiz answer!";
-                            return $result;
-                        }
-                    }
-                    $answers[] = $answer->id;
-                    if ($question->fraction[$key] > $maxfraction) {
-                        $maxfraction = $question->fraction[$key];
-                    }
-                }
-            }
-
-            if ($options = get_record("quiz_shortanswer", "question", $question->id)) {
-                $options->answers = implode(",",$answers);
-                $options->usecase = $question->usecase;
-                if (!update_record("quiz_shortanswer", $options)) {
-                    $result->error = "Could not update quiz shortanswer options! (id=$options->id)";
-                    return $result;
-                }
-            } else {
-                unset($options);
-                $options->question = $question->id;
-                $options->answers = implode(",",$answers);
-                $options->usecase = $question->usecase;
-                if (!insert_record("quiz_shortanswer", $options)) {
-                    $result->error = "Could not insert quiz shortanswer options!";
-                    return $result;
-                }
-            }
-
-            /// Perform sanity checks on fractional grades
-            if ($maxfraction != 1) {
-                $maxfraction = $maxfraction * 100;
-                $result->noticeyesno = get_string("fractionsnomax", "quiz", $maxfraction);
-                return $result;
-            }
-        break;
-
-        case NUMERICAL:   // Note similarities to SHORTANSWER
-
-            if (!$oldanswers = get_records("quiz_answers", "question", $question->id, "id ASC")) {
-                $oldanswers = array();
-            }
-
-            $answers = array();
-            $maxfraction = -1;
-
-            // Insert all the new answers
-            foreach ($question->answer as $key => $dataanswer) {
-                if ($dataanswer != "") {
-                    if ($oldanswer = array_shift($oldanswers)) {  // Existing answer, so reuse it
-                        $answer = $oldanswer;
-                        $answer->answer   = $dataanswer;
-                        $answer->fraction = $question->fraction[$key];
-                        $answer->feedback = $question->feedback[$key];
-                        if (!update_record("quiz_answers", $answer)) {
-                            $result->error = "Could not update quiz answer! (id=$answer->id)";
-                            return $result;
-                        }
-                    } else {    // This is a completely new answer
-                        unset($answer);
-                        $answer->answer   = $dataanswer;
-                        $answer->question = $question->id;
-                        $answer->fraction = $question->fraction[$key];
-                        $answer->feedback = $question->feedback[$key];
-                        if (!$answer->id = insert_record("quiz_answers", $answer)) {
-                            $result->error = "Could not insert quiz answer!";
-                            return $result;
-                        }
-                    }
-                    $answers[] = $answer->id;
-                    if ($question->fraction[$key] > $maxfraction) {
-                        $maxfraction = $question->fraction[$key];
-                    }
-
-                    if ($options = get_record("quiz_numerical", "answer", $answer->id)) {
-                        $options->min= $question->min[$key];
-                        $options->max= $question->max[$key];
-                        if (!update_record("quiz_numerical", $options)) {
-                            $result->error = "Could not update quiz numerical options! (id=$options->id)";
-                            return $result;
-                        }
-                    } else { // completely new answer
-                        unset($options);
-                        $options->question = $question->id;
-                        $options->answer = $answer->id;
-                        $options->min = $question->min[$key];
-                        $options->max = $question->max[$key];
-                        if (!insert_record("quiz_numerical", $options)) {
-                            $result->error = "Could not insert quiz numerical options!";
-                            return $result;
-                        }
-                    }
-                }
-            }
-
-            /// Perform sanity checks on fractional grades
-            if ($maxfraction != 1) {
-                $maxfraction = $maxfraction * 100;
-                $result->noticeyesno = get_string("fractionsnomax", "quiz", $maxfraction);
-                return $result;
-            }
-        break;
-
-
-        case TRUEFALSE:
-
-            if (!$oldanswers = get_records("quiz_answers", "question", $question->id, "id ASC")) {
-                $oldanswers = array();
-            }
-
-            if ($true = array_shift($oldanswers)) {  // Existing answer, so reuse it
-                $true->answer   = get_string("true", "quiz");
-                $true->fraction = $question->answer;
-                $true->feedback = $question->feedbacktrue;
-                if (!update_record("quiz_answers", $true)) {
-                    $result->error = "Could not update quiz answer \"true\")!";
-                    return $result;
-                }
-            } else {
-                unset($true);
-                $true->answer   = get_string("true", "quiz");
-                $true->question = $question->id;
-                $true->fraction = $question->answer;
-                $true->feedback = $question->feedbacktrue;
-                if (!$true->id = insert_record("quiz_answers", $true)) {
-                    $result->error = "Could not insert quiz answer \"true\")!";
-                    return $result;
-                }
-            }
-
-            if ($false = array_shift($oldanswers)) {  // Existing answer, so reuse it
-                $false->answer   = get_string("false", "quiz");
-                $false->fraction = 1 - (int)$question->answer;
-                $false->feedback = $question->feedbackfalse;
-                if (!update_record("quiz_answers", $false)) {
-                    $result->error = "Could not insert quiz answer \"false\")!";
-                    return $result;
-                }
-            } else {
-                unset($false);
-                $false->answer   = get_string("false", "quiz");
-                $false->question = $question->id;
-                $false->fraction = 1 - (int)$question->answer;
-                $false->feedback = $question->feedbackfalse;
-                if (!$false->id = insert_record("quiz_answers", $false)) {
-                    $result->error = "Could not insert quiz answer \"false\")!";
-                    return $result;
-                }
-            }
-
-            if ($options = get_record("quiz_truefalse", "question", $question->id)) {
-                // No need to do anything, since the answer IDs won't have changed
-                // But we'll do it anyway, just for robustness
-                $options->trueanswer  = $true->id;
-                $options->falseanswer = $false->id;
-                if (!update_record("quiz_truefalse", $options)) {
-                    $result->error = "Could not update quiz truefalse options! (id=$options->id)";
-                    return $result;
-                }
-            } else {
-                unset($options);
-                $options->question    = $question->id;
-                $options->trueanswer  = $true->id;
-                $options->falseanswer = $false->id;
-                if (!insert_record("quiz_truefalse", $options)) {
-                    $result->error = "Could not insert quiz truefalse options!";
-                    return $result;
-                }
-            }
-        break;
-
-
-        case MULTICHOICE:
-
-            if (!$oldanswers = get_records("quiz_answers", "question", $question->id, "id ASC")) {
-                $oldanswers = array();
-            }
-            
-
-            // following hack to check at least two answers exist
-            $answercount = 0;
-            foreach ($question->answer as $key=>$dataanswer) {
-                if ($dataanswer != "") {
-                    $answercount++;
-                }
-            }
-            $answercount += count($oldanswers);
-            if ($answercount < 2) { // check there are at lest 2 answers for multiple choice
-                $result->notice = get_string("notenoughanswers", "quiz", "2");
-                return $result;
-            }
-            
-            
-
-            // Insert all the new answers
-
-            $totalfraction = 0;
-            $maxfraction = -1;
-
-            $answers = array();
-
-            foreach ($question->answer as $key => $dataanswer) {
-                if ($dataanswer != "") {
-                    if ($answer = array_shift($oldanswers)) {  // Existing answer, so reuse it
-                        $answer->answer   = $dataanswer;
-                        $answer->fraction = $question->fraction[$key];
-                        $answer->feedback = $question->feedback[$key];
-                        if (!update_record("quiz_answers", $answer)) {
-                            $result->error = "Could not update quiz answer! (id=$answer->id)";
-                            return $result;
-                        }
-                    } else {
-                        unset($answer);
-                        $answer->answer   = $dataanswer;
-                        $answer->question = $question->id;
-                        $answer->fraction = $question->fraction[$key];
-                        $answer->feedback = $question->feedback[$key];
-                        if (!$answer->id = insert_record("quiz_answers", $answer)) {
-                            $result->error = "Could not insert quiz answer! ";
-                            return $result;
-                        }
-                    }
-                    $answers[] = $answer->id;
-
-                    if ($question->fraction[$key] > 0) {                 // Sanity checks
-                        $totalfraction += $question->fraction[$key];
-                    }
-                    if ($question->fraction[$key] > $maxfraction) {
-                        $maxfraction = $question->fraction[$key];
-                    }
-                }
-            }
-
-            if ($options = get_record("quiz_multichoice", "question", $question->id)) {
-                $options->answers = implode(",",$answers);
-                $options->single = $question->single;
-                if (!update_record("quiz_multichoice", $options)) {
-                    $result->error = "Could not update quiz multichoice options! (id=$options->id)";
-                    return $result;
-                }
-            } else {
-                unset($options);
-                $options->question = $question->id;
-                $options->answers = implode(",",$answers);
-                $options->single = $question->single;
-                if (!insert_record("quiz_multichoice", $options)) {
-                    $result->error = "Could not insert quiz multichoice options!";
-                    return $result;
-                }
-            }
-
-            /// Perform sanity checks on fractional grades
-            if ($options->single) {
-                if ($maxfraction != 1) {
-                    $maxfraction = $maxfraction * 100;
-                    $result->noticeyesno = get_string("fractionsnomax", "quiz", $maxfraction);
-                    return $result;
-                }
-            } else {
-                $totalfraction = round($totalfraction,2);
-                if ($totalfraction != 1) {
-                    $totalfraction = $totalfraction * 100;
-                    $result->noticeyesno = get_string("fractionsaddwrong", "quiz", $totalfraction);
-                    return $result;
-                }
-            }
-        break;
-
-        case MATCH:
-
-            if (!$oldsubquestions = get_records("quiz_match_sub", "question", $question->id, "id ASC")) {
-                $oldsubquestions = array();
-            }
-
-
-            // following hack to check at least three answers exist
-            $answercount = 0;
-            foreach ($question->subquestions as $key=>$questiontext) {
-                $answertext = $question->subanswers[$key];
-                if (!empty($questiontext) and !empty($answertext)) {
-                    $answercount++;
-                }
-            }
-            $answercount += count($oldsubquestions);
-            if ($answercount < 3) { // check there are at lest 3 answers for matching type questions
-                $result->notice = get_string("notenoughanswers", "quiz", "3");
-                return $result;
-            }
-
-
-            
-            $subquestions = array();
-
-            // Insert all the new question+answer pairs
-            foreach ($question->subquestions as $key => $questiontext) {
-                $answertext = $question->subanswers[$key];
-                if (!empty($questiontext) and !empty($answertext)) {
-                    if ($subquestion = array_shift($oldsubquestions)) {  // Existing answer, so reuse it
-                        $subquestion->questiontext = $questiontext;
-                        $subquestion->answertext   = $answertext;
-                        if (!update_record("quiz_match_sub", $subquestion)) {
-                            $result->error = "Could not insert quiz match subquestion! (id=$subquestion->id)";
-                            return $result;
-                        }
-                    } else {
-                        unset($subquestion);
-                        $subquestion->question = $question->id;
-                        $subquestion->questiontext = $questiontext;
-                        $subquestion->answertext   = $answertext;
-                        if (!$subquestion->id = insert_record("quiz_match_sub", $subquestion)) {
-                            $result->error = "Could not insert quiz match subquestion!";
-                            return $result;
-                        }
-                    }
-                    $subquestions[] = $subquestion->id;
-                }
-            }
-
-            if (count($subquestions) < 3) {
-                $result->noticeyesno = get_string("notenoughsubquestions", "quiz");
-                return $result;
-            }
-
-            if ($options = get_record("quiz_match", "question", $question->id)) {
-                $options->subquestions = implode(",",$subquestions);
-                if (!update_record("quiz_match", $options)) {
-                    $result->error = "Could not update quiz match options! (id=$options->id)";
-                    return $result;
-                }
-            } else {
-                unset($options);
-                $options->question = $question->id;
-                $options->subquestions = implode(",",$subquestions);
-                if (!insert_record("quiz_match", $options)) {
-                    $result->error = "Could not insert quiz match options!";
-                    return $result;
-                }
-            }
-
-            break;
-
-
-        case RANDOMSAMATCH:
-            $options->question = $question->id;
-            $options->choose = $question->choose;
-            if ($existing = get_record("quiz_randomsamatch", "question", $options->question)) {
-                $options->id = $existing->id;
-                if (!update_record("quiz_randomsamatch", $options)) {
-                    $result->error = "Could not update quiz randomsamatch options!";
-                    return $result;
-                }
-            } else {
-                if (!insert_record("quiz_randomsamatch", $options)) {
-                    $result->error = "Could not insert quiz randomsamatch options!";
-                    return $result;
-                }
-            }
-        break;
-
-        case MULTIANSWER:
-            if (!$oldmultianswers = get_records("quiz_multianswers", "question", $question->id, "id ASC")) {
-                $oldmultianswers = array();
-            }
-
-            // Insert all the new multi answers
-            foreach ($question->answers as $dataanswer) {
-                if ($oldmultianswer = array_shift($oldmultianswers)) {  // Existing answer, so reuse it
-                    $multianswer = $oldmultianswer;
-                    $multianswer->positionkey = $dataanswer->positionkey;
-                    $multianswer->norm = $dataanswer->norm;
-                    $multianswer->answertype = $dataanswer->answertype;
-
-                    if (! $multianswer->answers = quiz_save_multianswer_alternatives
-                            ($question->id, $dataanswer->answertype,
-                             $dataanswer->alternatives, $oldmultianswer->answers))
-                    {
-                        $result->error = "Could not update multianswer alternatives! (id=$multianswer->id)";
-                        return $result;
-                    }
-                    if (!update_record("quiz_multianswers", $multianswer)) {
-                        $result->error = "Could not update quiz multianswer! (id=$multianswer->id)";
-                        return $result;
-                    }
-                } else {    // This is a completely new answer
-                    unset($multianswer);
-                    $multianswer->question = $question->id;
-                    $multianswer->positionkey = $dataanswer->positionkey;
-                    $multianswer->norm = $dataanswer->norm;
-                    $multianswer->answertype = $dataanswer->answertype;
-
-                    if (! $multianswer->answers = quiz_save_multianswer_alternatives
-                            ($question->id, $dataanswer->answertype,
-                             $dataanswer->alternatives))
-                    {
-                        $result->error = "Could not insert multianswer alternatives! (questionid=$question->id)";
-                        return $result;
-                    }
-                    if (!insert_record("quiz_multianswers", $multianswer)) {
-                        $result->error = "Could not insert quiz multianswer!";
-                        return $result;
-                    }
-                }
-            }
-        break;
-
-        case RANDOM:
-        break;
-
-        case DESCRIPTION:
-        break;
-
-        default:
-            $result->error = "Unsupported question type ($question->qtype)!";
-            return $result;
-        break;
-    }
-    return true;
-}
-
-
-function quiz_remove_unwanted_questions(&$questions, $quiz) {
-/// Given an array of questions, and a list of question IDs,
-/// this function removes unwanted questions from the array
-/// Used by review.php and attempt.php to counter changing quizzes
-
-    $quizquestions = array();
-    $quizids = explode(",", $quiz->questions);
-    foreach ($quizids as $quizid) {
-        $quizquestions[$quizid] = true;
-    }
-    foreach ($questions as $key => $question) {
-        if (!isset($quizquestions[$question->id])) {
-            unset($questions[$key]);
-        }
-    }
-}
-
-function quiz_save_multianswer_alternatives
-        ($questionid, $answertype, $alternatives, $oldalternativeids= NULL)
-{
-// Returns false if something goes wrong,
-// otherwise the ids of the answers.
-
-    if (empty($oldalternativeids)
-        or !($oldalternatives =
-                get_records_list('quiz_answers', 'id', $oldalternativeids)))
-    {
-        $oldalternatives = array();
-    }
-
-    $alternativeids = array();
-
-    foreach ($alternatives as $altdata) {
-
-        if ($altold = array_shift($oldalternatives)) { // Use existing one...
-            $alt = $altold;
-            $alt->answer = $altdata->answer;
-            $alt->fraction = $altdata->fraction;
-            $alt->feedback = $altdata->feedback;
-            if (!update_record("quiz_answers", $alt)) {
-                return false;
-            }
-
-        } else { // Completely new one
-            unset($alt);
-            $alt->question= $questionid;
-            $alt->answer = $altdata->answer;
-            $alt->fraction = $altdata->fraction;
-            $alt->feedback = $altdata->feedback;
-            if (!($alt->id = insert_record("quiz_answers", $alt))) {
-                return false;
-            }
-        }
-
-        // For the answer type numerical, each alternative has individual options:
-        if ($answertype == NUMERICAL) {
-            if ($numericaloptions =
-                    get_record('quiz_numerical', 'answer', $alt->id))
-            {
-                // Reuse existing numerical options
-                $numericaloptions->min = $altdata->min;
-                $numericaloptions->max = $altdata->max;
-                if (!update_record('quiz_numerical', $numericaloptions)) {
-                    return false;
-                }
-            } else {
-                // New numerical options
-                $numericaloptions->answer = $alt->id;
-                $numericaloptions->question = $questionid;
-                $numericaloptions->min = $altdata->min;
-                $numericaloptions->max = $altdata->max;
-                if (!insert_record("quiz_numerical", $numericaloptions)) {
-                    return false;
-                }
-            }
-        } else { // Delete obsolete numerical options
-            delete_records('quiz_numerical', 'answer', $alt->id);
-        } // end if NUMERICAL
-
-        $alternativeids[] = $alt->id;
-    } // end foreach $alternatives
-    $answers = implode(',', $alternativeids);
-
-    // Removal of obsolete alternatives from answers and quiz_numerical:
-    while ($altobsolete = array_shift($oldalternatives)) {
-        delete_records("quiz_answers", "id", $altobsolete->id);
-        
-        // Possibly obsolute numerical options are also to be deleted:
-        delete_records("quiz_numerical", 'answer', $altobsolete->id);
-    }
-
-    // Common alternative options and removal of obsolete options
-    switch ($answertype) {
-        case NUMERICAL:
-            if (!empty($oldalternativeids)) {
-                delete_records('quiz_shortanswer', 'answers', 
-$oldalternativeids);
-                delete_records('quiz_multichoice', 'answers', 
-$oldalternativeids);
-            }
-            break;
-        case SHORTANSWER:
-            if (!empty($oldalternativeids)) {
-                delete_records('quiz_multichoice', 'answers', 
-$oldalternativeids);
-                $options = get_record('quiz_shortanswer',
-                                      'answers', $oldalternativeids);
-            } else {
-                unset($options);
-            }
-            if (empty($options)) {
-                // Create new shortanswer options
-                $options->question = $questionid;
-                $options->usecase = 0;
-                $options->answers = $answers;
-                if (!insert_record('quiz_shortanswer', $options)) {
-                    return false;
-                }
-            } else if ($answers != $oldalternativeids) {
-                // Shortanswer options needs update:
-                $options->answers = $answers;
-                if (!update_record('quiz_shortanswer', $options)) {
-                    return false;
-                }
-            }
-            break;
-        case MULTICHOICE:
-            if (!empty($oldalternativeids)) {
-                delete_records('quiz_shortanswer', 'answers', 
-$oldalternativeids);
-                $options = get_record('quiz_multichoice',
-                                      'answers', $oldalternativeids);
-            } else {
-                unset($options);
-            }
-            if (empty($options)) {
-                // Create new multichoice options
-                $options->question = $questionid;
-                $options->layout = 0;
-                $options->single = 1;
-                $options->answers = $answers;
-                if (!insert_record('quiz_multichoice', $options)) {
-                    return false;
-                }
-            } else if ($answers != $oldalternativeids) {
-                // Multichoice options needs update:
-                $options->answers = $answers;
-                if (!update_record('quiz_multichoice', $options)) {
-                    return false;
-                }
-            }
-            break;
-        default:
-            return false;
-    }
-    return $answers;       
-}
-
-function quiz_get_recent_mod_activity(&$activities, &$index, $sincetime, $courseid, $quiz="0", $user="", $groupid="") {
-// Returns all quizzes since a given time.  If quiz is specified then
-// this restricts the results
-
-    global $CFG;
-
-    if ($quiz) {
-        $quizselect = " AND cm.id = '$quiz'";
-    } else {
-        $quizselect = "";
-    }
-    if ($user) {
-        $userselect = " AND u.id = '$user'";
-    } else {
-        $userselect = "";
-    }
-
-    $quizzes = get_records_sql("SELECT qa.*, q.name, u.firstname, u.lastname, u.picture,
-                                       q.course, q.sumgrades as maxgrade, cm.instance, cm.section
-                                  FROM {$CFG->prefix}quiz_attempts qa,
-                                       {$CFG->prefix}quiz q,
-                                       {$CFG->prefix}user u,
-                                       {$CFG->prefix}course_modules cm
-                                 WHERE qa.timefinish > '$sincetime'
-                                   AND qa.userid = u.id $userselect
-                                   AND qa.quiz = q.id $quizselect
-                                   AND cm.instance = q.id
-                                   AND cm.course = '$courseid'
-                                   AND q.course = cm.course
-                                 ORDER BY qa.timefinish ASC");
-
-    if (empty($quizzes))
-      return;
 
     foreach ($quizzes as $quiz) {
-        if (empty($groupid) || ismember($groupid, $quiz->userid)) {
-
-          $tmpactivity->type = "quiz";
-          $tmpactivity->defaultindex = $index;
-          $tmpactivity->instance = $quiz->quiz;
-
-          $tmpactivity->name = $quiz->name;
-          $tmpactivity->section = $quiz->section;
-
-          $tmpactivity->content->attemptid = $quiz->id;
-          $tmpactivity->content->sumgrades = $quiz->sumgrades;
-          $tmpactivity->content->maxgrade = $quiz->maxgrade;
-          $tmpactivity->content->attempt = $quiz->attempt;
-
-          $tmpactivity->user->userid = $quiz->userid;
-          $tmpactivity->user->fullname = fullname($quiz);
-          $tmpactivity->user->picture = $quiz->picture;
-
-          $tmpactivity->timestamp = $quiz->timefinish;
-
-          $activities[] = $tmpactivity;
-
-          $index++;
-        }
+        quiz_update_events($quiz);
     }
 
-  return;
+    return true;
 }
 
+/**
+ * Returns all quiz graded users since a given time for specified quiz
+ */
+function quiz_get_recent_mod_activity(&$activities, &$index, $timestart,
+        $courseid, $cmid, $userid = 0, $groupid = 0) {
+    global $CFG, $USER, $DB;
+    require_once($CFG->dirroot . '/mod/quiz/locallib.php');
 
-function quiz_print_recent_mod_activity($activity, $course, $detail=false) {
-    global $CFG, $THEME;
+    $course = get_course($courseid);
+    $modinfo = get_fast_modinfo($course);
 
-    echo '<table border="0" cellpadding="3" cellspacing="0">';
+    $cm = $modinfo->cms[$cmid];
+    $quiz = $DB->get_record('quiz', array('id' => $cm->instance));
 
-    echo "<tr><td bgcolor=\"$THEME->cellcontent2\" class=\"forumpostpicture\" width=\"35\" valign=\"top\">";
-    print_user_picture($activity->user->userid, $course, $activity->user->picture);
-    echo "</td><td width=\"100%\"><font size=2>";
+    if ($userid) {
+        $userselect = "AND u.id = :userid";
+        $params['userid'] = $userid;
+    } else {
+        $userselect = '';
+    }
+
+    if ($groupid) {
+        $groupselect = 'AND gm.groupid = :groupid';
+        $groupjoin   = 'JOIN {groups_members} gm ON  gm.userid=u.id';
+        $params['groupid'] = $groupid;
+    } else {
+        $groupselect = '';
+        $groupjoin   = '';
+    }
+
+    $params['timestart'] = $timestart;
+    $params['quizid'] = $quiz->id;
+
+    $ufields = user_picture::fields('u', null, 'useridagain');
+    if (!$attempts = $DB->get_records_sql("
+              SELECT qa.*,
+                     {$ufields}
+                FROM {quiz_attempts} qa
+                     JOIN {user} u ON u.id = qa.userid
+                     $groupjoin
+               WHERE qa.timefinish > :timestart
+                 AND qa.quiz = :quizid
+                 AND qa.preview = 0
+                     $userselect
+                     $groupselect
+            ORDER BY qa.timefinish ASC", $params)) {
+        return;
+    }
+
+    $context         = context_module::instance($cm->id);
+    $accessallgroups = has_capability('moodle/site:accessallgroups', $context);
+    $viewfullnames   = has_capability('moodle/site:viewfullnames', $context);
+    $grader          = has_capability('mod/quiz:viewreports', $context);
+    $groupmode       = groups_get_activity_groupmode($cm, $course);
+
+    $usersgroups = null;
+    $aname = format_string($cm->name, true);
+    foreach ($attempts as $attempt) {
+        if ($attempt->userid != $USER->id) {
+            if (!$grader) {
+                // Grade permission required.
+                continue;
+            }
+
+            if ($groupmode == SEPARATEGROUPS and !$accessallgroups) {
+                $usersgroups = groups_get_all_groups($course->id,
+                        $attempt->userid, $cm->groupingid);
+                $usersgroups = array_keys($usersgroups);
+                if (!array_intersect($usersgroups, $modinfo->get_groups($cm->groupingid))) {
+                    continue;
+                }
+            }
+        }
+
+        $options = quiz_get_review_options($quiz, $attempt, $context);
+
+        $tmpactivity = new stdClass();
+
+        $tmpactivity->type       = 'quiz';
+        $tmpactivity->cmid       = $cm->id;
+        $tmpactivity->name       = $aname;
+        $tmpactivity->sectionnum = $cm->sectionnum;
+        $tmpactivity->timestamp  = $attempt->timefinish;
+
+        $tmpactivity->content = new stdClass();
+        $tmpactivity->content->attemptid = $attempt->id;
+        $tmpactivity->content->attempt   = $attempt->attempt;
+        if (quiz_has_grades($quiz) && $options->marks >= question_display_options::MARK_AND_MAX) {
+            $tmpactivity->content->sumgrades = quiz_format_grade($quiz, $attempt->sumgrades);
+            $tmpactivity->content->maxgrade  = quiz_format_grade($quiz, $quiz->sumgrades);
+        } else {
+            $tmpactivity->content->sumgrades = null;
+            $tmpactivity->content->maxgrade  = null;
+        }
+
+        $tmpactivity->user = user_picture::unalias($attempt, null, 'useridagain');
+        $tmpactivity->user->fullname  = fullname($tmpactivity->user, $viewfullnames);
+
+        $activities[$index++] = $tmpactivity;
+    }
+}
+
+function quiz_print_recent_mod_activity($activity, $courseid, $detail, $modnames) {
+    global $CFG, $OUTPUT;
+
+    echo '<table border="0" cellpadding="3" cellspacing="0" class="forum-recent">';
+
+    echo '<tr><td class="userpicture" valign="top">';
+    echo $OUTPUT->user_picture($activity->user, array('courseid' => $courseid));
+    echo '</td><td>';
 
     if ($detail) {
-        echo "<img src=\"$CFG->modpixpath/$activity->type/icon.gif\" ".
-             "height=16 width=16 alt=\"$activity->type\">  ";
-        echo "<a href=\"$CFG->wwwroot/mod/quiz/view.php?id=" . $activity->instance . "\">"
-             . $activity->name . "</a> - ";
-
+        $modname = $modnames[$activity->type];
+        echo '<div class="title">';
+        echo $OUTPUT->image_icon('icon', $modname, $activity->type);
+        echo '<a href="' . $CFG->wwwroot . '/mod/quiz/view.php?id=' .
+                $activity->cmid . '">' . $activity->name . '</a>';
+        echo '</div>';
     }
 
-    if (isteacher($USER)) {
-        $grades = "(" .  $activity->content->sumgrades . " / " . $activity->content->maxgrade . ") ";
-        echo "<a href=\"$CFG->wwwroot/mod/quiz/review.php?q="
-             . $activity->instance . "&attempt="
-             . $activity->content->attemptid . "\">" . $grades . "</a> ";
-
-        echo  get_string("attempt", "quiz") . " - " . $activity->content->attempt . "<br>";
+    echo '<div class="grade">';
+    echo  get_string('attempt', 'quiz', $activity->content->attempt);
+    if (isset($activity->content->maxgrade)) {
+        $grades = $activity->content->sumgrades . ' / ' . $activity->content->maxgrade;
+        echo ': (<a href="' . $CFG->wwwroot . '/mod/quiz/review.php?attempt=' .
+                $activity->content->attemptid . '">' . $grades . '</a>)';
     }
-    echo "<a href=\"$CFG->wwwroot/user/view.php?id="
-         . $activity->user->userid . "&course=$course\">"
-         . $activity->user->fullname . "</a> ";
+    echo '</div>';
 
-    echo " - " . userdate($activity->timestamp);
+    echo '<div class="user">';
+    echo '<a href="' . $CFG->wwwroot . '/user/view.php?id=' . $activity->user->id .
+            '&amp;course=' . $courseid . '">' . $activity->user->fullname .
+            '</a> - ' . userdate($activity->timestamp);
+    echo '</div>';
 
-    echo "</font></td></tr>";
-    echo "</table>";
+    echo '</td></tr></table>';
 
     return;
 }
 
-?>
+/**
+ * Pre-process the quiz options form data, making any necessary adjustments.
+ * Called by add/update instance in this file.
+ *
+ * @param object $quiz The variables set on the form.
+ */
+function quiz_process_options($quiz) {
+    global $CFG;
+    require_once($CFG->dirroot . '/mod/quiz/locallib.php');
+    require_once($CFG->libdir . '/questionlib.php');
+
+    $quiz->timemodified = time();
+
+    // Quiz name.
+    if (!empty($quiz->name)) {
+        $quiz->name = trim($quiz->name);
+    }
+
+    // Password field - different in form to stop browsers that remember passwords
+    // getting confused.
+    $quiz->password = $quiz->quizpassword;
+    unset($quiz->quizpassword);
+
+    // Quiz feedback.
+    if (isset($quiz->feedbacktext)) {
+        // Clean up the boundary text.
+        for ($i = 0; $i < count($quiz->feedbacktext); $i += 1) {
+            if (empty($quiz->feedbacktext[$i]['text'])) {
+                $quiz->feedbacktext[$i]['text'] = '';
+            } else {
+                $quiz->feedbacktext[$i]['text'] = trim($quiz->feedbacktext[$i]['text']);
+            }
+        }
+
+        // Check the boundary value is a number or a percentage, and in range.
+        $i = 0;
+        while (!empty($quiz->feedbackboundaries[$i])) {
+            $boundary = trim($quiz->feedbackboundaries[$i]);
+            if (!is_numeric($boundary)) {
+                if (strlen($boundary) > 0 && $boundary[strlen($boundary) - 1] == '%') {
+                    $boundary = trim(substr($boundary, 0, -1));
+                    if (is_numeric($boundary)) {
+                        $boundary = $boundary * $quiz->grade / 100.0;
+                    } else {
+                        return get_string('feedbackerrorboundaryformat', 'quiz', $i + 1);
+                    }
+                }
+            }
+            if ($boundary <= 0 || $boundary >= $quiz->grade) {
+                return get_string('feedbackerrorboundaryoutofrange', 'quiz', $i + 1);
+            }
+            if ($i > 0 && $boundary >= $quiz->feedbackboundaries[$i - 1]) {
+                return get_string('feedbackerrororder', 'quiz', $i + 1);
+            }
+            $quiz->feedbackboundaries[$i] = $boundary;
+            $i += 1;
+        }
+        $numboundaries = $i;
+
+        // Check there is nothing in the remaining unused fields.
+        if (!empty($quiz->feedbackboundaries)) {
+            for ($i = $numboundaries; $i < count($quiz->feedbackboundaries); $i += 1) {
+                if (!empty($quiz->feedbackboundaries[$i]) &&
+                        trim($quiz->feedbackboundaries[$i]) != '') {
+                    return get_string('feedbackerrorjunkinboundary', 'quiz', $i + 1);
+                }
+            }
+        }
+        for ($i = $numboundaries + 1; $i < count($quiz->feedbacktext); $i += 1) {
+            if (!empty($quiz->feedbacktext[$i]['text']) &&
+                    trim($quiz->feedbacktext[$i]['text']) != '') {
+                return get_string('feedbackerrorjunkinfeedback', 'quiz', $i + 1);
+            }
+        }
+        // Needs to be bigger than $quiz->grade because of '<' test in quiz_feedback_for_grade().
+        $quiz->feedbackboundaries[-1] = $quiz->grade + 1;
+        $quiz->feedbackboundaries[$numboundaries] = 0;
+        $quiz->feedbackboundarycount = $numboundaries;
+    } else {
+        $quiz->feedbackboundarycount = -1;
+    }
+
+    // Combing the individual settings into the review columns.
+    $quiz->reviewattempt = quiz_review_option_form_to_db($quiz, 'attempt');
+    $quiz->reviewcorrectness = quiz_review_option_form_to_db($quiz, 'correctness');
+    $quiz->reviewmarks = quiz_review_option_form_to_db($quiz, 'marks');
+    $quiz->reviewspecificfeedback = quiz_review_option_form_to_db($quiz, 'specificfeedback');
+    $quiz->reviewgeneralfeedback = quiz_review_option_form_to_db($quiz, 'generalfeedback');
+    $quiz->reviewrightanswer = quiz_review_option_form_to_db($quiz, 'rightanswer');
+    $quiz->reviewoverallfeedback = quiz_review_option_form_to_db($quiz, 'overallfeedback');
+    $quiz->reviewattempt |= mod_quiz_display_options::DURING;
+    $quiz->reviewoverallfeedback &= ~mod_quiz_display_options::DURING;
+}
+
+/**
+ * Helper function for {@link quiz_process_options()}.
+ * @param object $fromform the sumbitted form date.
+ * @param string $field one of the review option field names.
+ */
+function quiz_review_option_form_to_db($fromform, $field) {
+    static $times = array(
+        'during' => mod_quiz_display_options::DURING,
+        'immediately' => mod_quiz_display_options::IMMEDIATELY_AFTER,
+        'open' => mod_quiz_display_options::LATER_WHILE_OPEN,
+        'closed' => mod_quiz_display_options::AFTER_CLOSE,
+    );
+
+    $review = 0;
+    foreach ($times as $whenname => $when) {
+        $fieldname = $field . $whenname;
+        if (isset($fromform->$fieldname)) {
+            $review |= $when;
+            unset($fromform->$fieldname);
+        }
+    }
+
+    return $review;
+}
+
+/**
+ * This function is called at the end of quiz_add_instance
+ * and quiz_update_instance, to do the common processing.
+ *
+ * @param object $quiz the quiz object.
+ */
+function quiz_after_add_or_update($quiz) {
+    global $DB;
+    $cmid = $quiz->coursemodule;
+
+    // We need to use context now, so we need to make sure all needed info is already in db.
+    $DB->set_field('course_modules', 'instance', $quiz->id, array('id'=>$cmid));
+    $context = context_module::instance($cmid);
+
+    // Save the feedback.
+    $DB->delete_records('quiz_feedback', array('quizid' => $quiz->id));
+
+    for ($i = 0; $i <= $quiz->feedbackboundarycount; $i++) {
+        $feedback = new stdClass();
+        $feedback->quizid = $quiz->id;
+        $feedback->feedbacktext = $quiz->feedbacktext[$i]['text'];
+        $feedback->feedbacktextformat = $quiz->feedbacktext[$i]['format'];
+        $feedback->mingrade = $quiz->feedbackboundaries[$i];
+        $feedback->maxgrade = $quiz->feedbackboundaries[$i - 1];
+        $feedback->id = $DB->insert_record('quiz_feedback', $feedback);
+        $feedbacktext = file_save_draft_area_files((int)$quiz->feedbacktext[$i]['itemid'],
+                $context->id, 'mod_quiz', 'feedback', $feedback->id,
+                array('subdirs' => false, 'maxfiles' => -1, 'maxbytes' => 0),
+                $quiz->feedbacktext[$i]['text']);
+        $DB->set_field('quiz_feedback', 'feedbacktext', $feedbacktext,
+                array('id' => $feedback->id));
+    }
+
+    // Store any settings belonging to the access rules.
+    quiz_access_manager::save_settings($quiz);
+
+    // Update the events relating to this quiz.
+    quiz_update_events($quiz);
+    $completionexpected = (!empty($quiz->completionexpected)) ? $quiz->completionexpected : null;
+    \core_completion\api::update_completion_date_event($quiz->coursemodule, 'quiz', $quiz->id, $completionexpected);
+
+    // Update related grade item.
+    quiz_grade_item_update($quiz);
+}
+
+/**
+ * This function updates the events associated to the quiz.
+ * If $override is non-zero, then it updates only the events
+ * associated with the specified override.
+ *
+ * @uses QUIZ_MAX_EVENT_LENGTH
+ * @param object $quiz the quiz object.
+ * @param object optional $override limit to a specific override
+ */
+function quiz_update_events($quiz, $override = null) {
+    global $DB;
+
+    // Load the old events relating to this quiz.
+    $conds = array('modulename'=>'quiz',
+                   'instance'=>$quiz->id);
+    if (!empty($override)) {
+        // Only load events for this override.
+        if (isset($override->userid)) {
+            $conds['userid'] = $override->userid;
+        } else {
+            $conds['groupid'] = $override->groupid;
+        }
+    }
+    $oldevents = $DB->get_records('event', $conds, 'id ASC');
+
+    // Now make a to-do list of all that needs to be updated.
+    if (empty($override)) {
+        // We are updating the primary settings for the quiz, so we need to add all the overrides.
+        $overrides = $DB->get_records('quiz_overrides', array('quiz' => $quiz->id), 'id ASC');
+        // It is necessary to add an empty stdClass to the beginning of the array as the $oldevents
+        // list contains the original (non-override) event for the module. If this is not included
+        // the logic below will end up updating the wrong row when we try to reconcile this $overrides
+        // list against the $oldevents list.
+        array_unshift($overrides, new stdClass());
+    } else {
+        // Just do the one override.
+        $overrides = array($override);
+    }
+
+    // Get group override priorities.
+    $grouppriorities = quiz_get_group_override_priorities($quiz->id);
+
+    foreach ($overrides as $current) {
+        $groupid   = isset($current->groupid)?  $current->groupid : 0;
+        $userid    = isset($current->userid)? $current->userid : 0;
+        $timeopen  = isset($current->timeopen)?  $current->timeopen : $quiz->timeopen;
+        $timeclose = isset($current->timeclose)? $current->timeclose : $quiz->timeclose;
+
+        // Only add open/close events for an override if they differ from the quiz default.
+        $addopen  = empty($current->id) || !empty($current->timeopen);
+        $addclose = empty($current->id) || !empty($current->timeclose);
+
+        if (!empty($quiz->coursemodule)) {
+            $cmid = $quiz->coursemodule;
+        } else {
+            $cmid = get_coursemodule_from_instance('quiz', $quiz->id, $quiz->course)->id;
+        }
+
+        $event = new stdClass();
+        $event->type = !$timeclose ? CALENDAR_EVENT_TYPE_ACTION : CALENDAR_EVENT_TYPE_STANDARD;
+        $event->description = format_module_intro('quiz', $quiz, $cmid);
+        // Events module won't show user events when the courseid is nonzero.
+        $event->courseid    = ($userid) ? 0 : $quiz->course;
+        $event->groupid     = $groupid;
+        $event->userid      = $userid;
+        $event->modulename  = 'quiz';
+        $event->instance    = $quiz->id;
+        $event->timestart   = $timeopen;
+        $event->timeduration = max($timeclose - $timeopen, 0);
+        $event->timesort    = $timeopen;
+        $event->visible     = instance_is_visible('quiz', $quiz);
+        $event->eventtype   = QUIZ_EVENT_TYPE_OPEN;
+        $event->priority    = null;
+
+        // Determine the event name and priority.
+        if ($groupid) {
+            // Group override event.
+            $params = new stdClass();
+            $params->quiz = $quiz->name;
+            $params->group = groups_get_group_name($groupid);
+            if ($params->group === false) {
+                // Group doesn't exist, just skip it.
+                continue;
+            }
+            $eventname = get_string('overridegroupeventname', 'quiz', $params);
+            // Set group override priority.
+            if ($grouppriorities !== null) {
+                $openpriorities = $grouppriorities['open'];
+                if (isset($openpriorities[$timeopen])) {
+                    $event->priority = $openpriorities[$timeopen];
+                }
+            }
+        } else if ($userid) {
+            // User override event.
+            $params = new stdClass();
+            $params->quiz = $quiz->name;
+            $eventname = get_string('overrideusereventname', 'quiz', $params);
+            // Set user override priority.
+            $event->priority = CALENDAR_EVENT_USER_OVERRIDE_PRIORITY;
+        } else {
+            // The parent event.
+            $eventname = $quiz->name;
+        }
+
+        if ($addopen or $addclose) {
+            // Separate start and end events.
+            $event->timeduration  = 0;
+            if ($timeopen && $addopen) {
+                if ($oldevent = array_shift($oldevents)) {
+                    $event->id = $oldevent->id;
+                } else {
+                    unset($event->id);
+                }
+                $event->name = $eventname.' ('.get_string('quizopens', 'quiz').')';
+                // The method calendar_event::create will reuse a db record if the id field is set.
+                calendar_event::create($event);
+            }
+            if ($timeclose && $addclose) {
+                if ($oldevent = array_shift($oldevents)) {
+                    $event->id = $oldevent->id;
+                } else {
+                    unset($event->id);
+                }
+                $event->type      = CALENDAR_EVENT_TYPE_ACTION;
+                $event->name      = $eventname.' ('.get_string('quizcloses', 'quiz').')';
+                $event->timestart = $timeclose;
+                $event->timesort  = $timeclose;
+                $event->eventtype = QUIZ_EVENT_TYPE_CLOSE;
+                if ($groupid && $grouppriorities !== null) {
+                    $closepriorities = $grouppriorities['close'];
+                    if (isset($closepriorities[$timeclose])) {
+                        $event->priority = $closepriorities[$timeclose];
+                    }
+                }
+                calendar_event::create($event);
+            }
+        }
+    }
+
+    // Delete any leftover events.
+    foreach ($oldevents as $badevent) {
+        $badevent = calendar_event::load($badevent);
+        $badevent->delete();
+    }
+}
+
+/**
+ * Calculates the priorities of timeopen and timeclose values for group overrides for a quiz.
+ *
+ * @param int $quizid The quiz ID.
+ * @return array|null Array of group override priorities for open and close times. Null if there are no group overrides.
+ */
+function quiz_get_group_override_priorities($quizid) {
+    global $DB;
+
+    // Fetch group overrides.
+    $where = 'quiz = :quiz AND groupid IS NOT NULL';
+    $params = ['quiz' => $quizid];
+    $overrides = $DB->get_records_select('quiz_overrides', $where, $params, '', 'id, timeopen, timeclose');
+    if (!$overrides) {
+        return null;
+    }
+
+    $grouptimeopen = [];
+    $grouptimeclose = [];
+    foreach ($overrides as $override) {
+        if ($override->timeopen !== null && !in_array($override->timeopen, $grouptimeopen)) {
+            $grouptimeopen[] = $override->timeopen;
+        }
+        if ($override->timeclose !== null && !in_array($override->timeclose, $grouptimeclose)) {
+            $grouptimeclose[] = $override->timeclose;
+        }
+    }
+
+    // Sort open times in ascending manner. The earlier open time gets higher priority.
+    sort($grouptimeopen);
+    // Set priorities.
+    $opengrouppriorities = [];
+    $openpriority = 1;
+    foreach ($grouptimeopen as $timeopen) {
+        $opengrouppriorities[$timeopen] = $openpriority++;
+    }
+
+    // Sort close times in descending manner. The later close time gets higher priority.
+    rsort($grouptimeclose);
+    // Set priorities.
+    $closegrouppriorities = [];
+    $closepriority = 1;
+    foreach ($grouptimeclose as $timeclose) {
+        $closegrouppriorities[$timeclose] = $closepriority++;
+    }
+
+    return [
+        'open' => $opengrouppriorities,
+        'close' => $closegrouppriorities
+    ];
+}
+
+/**
+ * List the actions that correspond to a view of this module.
+ * This is used by the participation report.
+ *
+ * Note: This is not used by new logging system. Event with
+ *       crud = 'r' and edulevel = LEVEL_PARTICIPATING will
+ *       be considered as view action.
+ *
+ * @return array
+ */
+function quiz_get_view_actions() {
+    return array('view', 'view all', 'report', 'review');
+}
+
+/**
+ * List the actions that correspond to a post of this module.
+ * This is used by the participation report.
+ *
+ * Note: This is not used by new logging system. Event with
+ *       crud = ('c' || 'u' || 'd') and edulevel = LEVEL_PARTICIPATING
+ *       will be considered as post action.
+ *
+ * @return array
+ */
+function quiz_get_post_actions() {
+    return array('attempt', 'close attempt', 'preview', 'editquestions',
+            'delete attempt', 'manualgrade');
+}
+
+/**
+ * @param array $questionids of question ids.
+ * @return bool whether any of these questions are used by any instance of this module.
+ */
+function quiz_questions_in_use($questionids) {
+    global $DB, $CFG;
+    require_once($CFG->libdir . '/questionlib.php');
+    list($test, $params) = $DB->get_in_or_equal($questionids);
+    return $DB->record_exists_select('quiz_slots',
+            'questionid ' . $test, $params) || question_engine::questions_in_use(
+            $questionids, new qubaid_join('{quiz_attempts} quiza',
+            'quiza.uniqueid', 'quiza.preview = 0'));
+}
+
+/**
+ * Implementation of the function for printing the form elements that control
+ * whether the course reset functionality affects the quiz.
+ *
+ * @param $mform the course reset form that is being built.
+ */
+function quiz_reset_course_form_definition($mform) {
+    $mform->addElement('header', 'quizheader', get_string('modulenameplural', 'quiz'));
+    $mform->addElement('advcheckbox', 'reset_quiz_attempts',
+            get_string('removeallquizattempts', 'quiz'));
+    $mform->addElement('advcheckbox', 'reset_quiz_user_overrides',
+            get_string('removealluseroverrides', 'quiz'));
+    $mform->addElement('advcheckbox', 'reset_quiz_group_overrides',
+            get_string('removeallgroupoverrides', 'quiz'));
+}
+
+/**
+ * Course reset form defaults.
+ * @return array the defaults.
+ */
+function quiz_reset_course_form_defaults($course) {
+    return array('reset_quiz_attempts' => 1,
+                 'reset_quiz_group_overrides' => 1,
+                 'reset_quiz_user_overrides' => 1);
+}
+
+/**
+ * Removes all grades from gradebook
+ *
+ * @param int $courseid
+ * @param string optional type
+ */
+function quiz_reset_gradebook($courseid, $type='') {
+    global $CFG, $DB;
+
+    $quizzes = $DB->get_records_sql("
+            SELECT q.*, cm.idnumber as cmidnumber, q.course as courseid
+            FROM {modules} m
+            JOIN {course_modules} cm ON m.id = cm.module
+            JOIN {quiz} q ON cm.instance = q.id
+            WHERE m.name = 'quiz' AND cm.course = ?", array($courseid));
+
+    foreach ($quizzes as $quiz) {
+        quiz_grade_item_update($quiz, 'reset');
+    }
+}
+
+/**
+ * Actual implementation of the reset course functionality, delete all the
+ * quiz attempts for course $data->courseid, if $data->reset_quiz_attempts is
+ * set and true.
+ *
+ * Also, move the quiz open and close dates, if the course start date is changing.
+ *
+ * @param object $data the data submitted from the reset course.
+ * @return array status array
+ */
+function quiz_reset_userdata($data) {
+    global $CFG, $DB;
+    require_once($CFG->libdir . '/questionlib.php');
+
+    $componentstr = get_string('modulenameplural', 'quiz');
+    $status = array();
+
+    // Delete attempts.
+    if (!empty($data->reset_quiz_attempts)) {
+        question_engine::delete_questions_usage_by_activities(new qubaid_join(
+                '{quiz_attempts} quiza JOIN {quiz} quiz ON quiza.quiz = quiz.id',
+                'quiza.uniqueid', 'quiz.course = :quizcourseid',
+                array('quizcourseid' => $data->courseid)));
+
+        $DB->delete_records_select('quiz_attempts',
+                'quiz IN (SELECT id FROM {quiz} WHERE course = ?)', array($data->courseid));
+        $status[] = array(
+            'component' => $componentstr,
+            'item' => get_string('attemptsdeleted', 'quiz'),
+            'error' => false);
+
+        // Remove all grades from gradebook.
+        $DB->delete_records_select('quiz_grades',
+                'quiz IN (SELECT id FROM {quiz} WHERE course = ?)', array($data->courseid));
+        if (empty($data->reset_gradebook_grades)) {
+            quiz_reset_gradebook($data->courseid);
+        }
+        $status[] = array(
+            'component' => $componentstr,
+            'item' => get_string('gradesdeleted', 'quiz'),
+            'error' => false);
+    }
+
+    // Remove user overrides.
+    if (!empty($data->reset_quiz_user_overrides)) {
+        $DB->delete_records_select('quiz_overrides',
+                'quiz IN (SELECT id FROM {quiz} WHERE course = ?) AND userid IS NOT NULL', array($data->courseid));
+        $status[] = array(
+            'component' => $componentstr,
+            'item' => get_string('useroverridesdeleted', 'quiz'),
+            'error' => false);
+    }
+    // Remove group overrides.
+    if (!empty($data->reset_quiz_group_overrides)) {
+        $DB->delete_records_select('quiz_overrides',
+                'quiz IN (SELECT id FROM {quiz} WHERE course = ?) AND groupid IS NOT NULL', array($data->courseid));
+        $status[] = array(
+            'component' => $componentstr,
+            'item' => get_string('groupoverridesdeleted', 'quiz'),
+            'error' => false);
+    }
+
+    // Updating dates - shift may be negative too.
+    if ($data->timeshift) {
+        $DB->execute("UPDATE {quiz_overrides}
+                         SET timeopen = timeopen + ?
+                       WHERE quiz IN (SELECT id FROM {quiz} WHERE course = ?)
+                         AND timeopen <> 0", array($data->timeshift, $data->courseid));
+        $DB->execute("UPDATE {quiz_overrides}
+                         SET timeclose = timeclose + ?
+                       WHERE quiz IN (SELECT id FROM {quiz} WHERE course = ?)
+                         AND timeclose <> 0", array($data->timeshift, $data->courseid));
+
+        shift_course_mod_dates('quiz', array('timeopen', 'timeclose'),
+                $data->timeshift, $data->courseid);
+
+        $status[] = array(
+            'component' => $componentstr,
+            'item' => get_string('openclosedatesupdated', 'quiz'),
+            'error' => false);
+    }
+
+    return $status;
+}
+
+/**
+ * Prints quiz summaries on MyMoodle Page
+ *
+ * @deprecated since 3.3
+ * @todo The final deprecation of this function will take place in Moodle 3.7 - see MDL-57487.
+ * @param array $courses
+ * @param array $htmlarray
+ */
+function quiz_print_overview($courses, &$htmlarray) {
+    global $USER, $CFG;
+
+    debugging('The function quiz_print_overview() is now deprecated.', DEBUG_DEVELOPER);
+
+    // These next 6 Lines are constant in all modules (just change module name).
+    if (empty($courses) || !is_array($courses) || count($courses) == 0) {
+        return array();
+    }
+
+    if (!$quizzes = get_all_instances_in_courses('quiz', $courses)) {
+        return;
+    }
+
+    // Get the quizzes attempts.
+    $attemptsinfo = [];
+    $quizids = [];
+    foreach ($quizzes as $quiz) {
+        $quizids[] = $quiz->id;
+        $attemptsinfo[$quiz->id] = ['count' => 0, 'hasfinished' => false];
+    }
+    $attempts = quiz_get_user_attempts($quizids, $USER->id);
+    foreach ($attempts as $attempt) {
+        $attemptsinfo[$attempt->quiz]['count']++;
+        $attemptsinfo[$attempt->quiz]['hasfinished'] = true;
+    }
+    unset($attempts);
+
+    // Fetch some language strings outside the main loop.
+    $strquiz = get_string('modulename', 'quiz');
+    $strnoattempts = get_string('noattempts', 'quiz');
+
+    // We want to list quizzes that are currently available, and which have a close date.
+    // This is the same as what the lesson does, and the dabate is in MDL-10568.
+    $now = time();
+    foreach ($quizzes as $quiz) {
+        if ($quiz->timeclose >= $now && $quiz->timeopen < $now) {
+            $str = '';
+
+            // Now provide more information depending on the uers's role.
+            $context = context_module::instance($quiz->coursemodule);
+            if (has_capability('mod/quiz:viewreports', $context)) {
+                // For teacher-like people, show a summary of the number of student attempts.
+                // The $quiz objects returned by get_all_instances_in_course have the necessary $cm
+                // fields set to make the following call work.
+                $str .= '<div class="info">' . quiz_num_attempt_summary($quiz, $quiz, true) . '</div>';
+
+            } else if (has_any_capability(array('mod/quiz:reviewmyattempts', 'mod/quiz:attempt'), $context)) { // Student
+                // For student-like people, tell them how many attempts they have made.
+
+                if (isset($USER->id)) {
+                    if ($attemptsinfo[$quiz->id]['hasfinished']) {
+                        // The student's last attempt is finished.
+                        continue;
+                    }
+
+                    if ($attemptsinfo[$quiz->id]['count'] > 0) {
+                        $str .= '<div class="info">' .
+                            get_string('numattemptsmade', 'quiz', $attemptsinfo[$quiz->id]['count']) . '</div>';
+                    } else {
+                        $str .= '<div class="info">' . $strnoattempts . '</div>';
+                    }
+
+                } else {
+                    $str .= '<div class="info">' . $strnoattempts . '</div>';
+                }
+
+            } else {
+                // For ayone else, there is no point listing this quiz, so stop processing.
+                continue;
+            }
+
+            // Give a link to the quiz, and the deadline.
+            $html = '<div class="quiz overview">' .
+                    '<div class="name">' . $strquiz . ': <a ' .
+                    ($quiz->visible ? '' : ' class="dimmed"') .
+                    ' href="' . $CFG->wwwroot . '/mod/quiz/view.php?id=' .
+                    $quiz->coursemodule . '">' .
+                    $quiz->name . '</a></div>';
+            $html .= '<div class="info">' . get_string('quizcloseson', 'quiz',
+                    userdate($quiz->timeclose)) . '</div>';
+            $html .= $str;
+            $html .= '</div>';
+            if (empty($htmlarray[$quiz->course]['quiz'])) {
+                $htmlarray[$quiz->course]['quiz'] = $html;
+            } else {
+                $htmlarray[$quiz->course]['quiz'] .= $html;
+            }
+        }
+    }
+}
+
+/**
+ * Return a textual summary of the number of attempts that have been made at a particular quiz,
+ * returns '' if no attempts have been made yet, unless $returnzero is passed as true.
+ *
+ * @param object $quiz the quiz object. Only $quiz->id is used at the moment.
+ * @param object $cm the cm object. Only $cm->course, $cm->groupmode and
+ *      $cm->groupingid fields are used at the moment.
+ * @param bool $returnzero if false (default), when no attempts have been
+ *      made '' is returned instead of 'Attempts: 0'.
+ * @param int $currentgroup if there is a concept of current group where this method is being called
+ *         (e.g. a report) pass it in here. Default 0 which means no current group.
+ * @return string a string like "Attempts: 123", "Attemtps 123 (45 from your groups)" or
+ *          "Attemtps 123 (45 from this group)".
+ */
+function quiz_num_attempt_summary($quiz, $cm, $returnzero = false, $currentgroup = 0) {
+    global $DB, $USER;
+    $numattempts = $DB->count_records('quiz_attempts', array('quiz'=> $quiz->id, 'preview'=>0));
+    if ($numattempts || $returnzero) {
+        if (groups_get_activity_groupmode($cm)) {
+            $a = new stdClass();
+            $a->total = $numattempts;
+            if ($currentgroup) {
+                $a->group = $DB->count_records_sql('SELECT COUNT(DISTINCT qa.id) FROM ' .
+                        '{quiz_attempts} qa JOIN ' .
+                        '{groups_members} gm ON qa.userid = gm.userid ' .
+                        'WHERE quiz = ? AND preview = 0 AND groupid = ?',
+                        array($quiz->id, $currentgroup));
+                return get_string('attemptsnumthisgroup', 'quiz', $a);
+            } else if ($groups = groups_get_all_groups($cm->course, $USER->id, $cm->groupingid)) {
+                list($usql, $params) = $DB->get_in_or_equal(array_keys($groups));
+                $a->group = $DB->count_records_sql('SELECT COUNT(DISTINCT qa.id) FROM ' .
+                        '{quiz_attempts} qa JOIN ' .
+                        '{groups_members} gm ON qa.userid = gm.userid ' .
+                        'WHERE quiz = ? AND preview = 0 AND ' .
+                        "groupid $usql", array_merge(array($quiz->id), $params));
+                return get_string('attemptsnumyourgroups', 'quiz', $a);
+            }
+        }
+        return get_string('attemptsnum', 'quiz', $numattempts);
+    }
+    return '';
+}
+
+/**
+ * Returns the same as {@link quiz_num_attempt_summary()} but wrapped in a link
+ * to the quiz reports.
+ *
+ * @param object $quiz the quiz object. Only $quiz->id is used at the moment.
+ * @param object $cm the cm object. Only $cm->course, $cm->groupmode and
+ *      $cm->groupingid fields are used at the moment.
+ * @param object $context the quiz context.
+ * @param bool $returnzero if false (default), when no attempts have been made
+ *      '' is returned instead of 'Attempts: 0'.
+ * @param int $currentgroup if there is a concept of current group where this method is being called
+ *         (e.g. a report) pass it in here. Default 0 which means no current group.
+ * @return string HTML fragment for the link.
+ */
+function quiz_attempt_summary_link_to_reports($quiz, $cm, $context, $returnzero = false,
+        $currentgroup = 0) {
+    global $CFG;
+    $summary = quiz_num_attempt_summary($quiz, $cm, $returnzero, $currentgroup);
+    if (!$summary) {
+        return '';
+    }
+
+    require_once($CFG->dirroot . '/mod/quiz/report/reportlib.php');
+    $url = new moodle_url('/mod/quiz/report.php', array(
+            'id' => $cm->id, 'mode' => quiz_report_default_report($context)));
+    return html_writer::link($url, $summary);
+}
+
+/**
+ * @param string $feature FEATURE_xx constant for requested feature
+ * @return bool True if quiz supports feature
+ */
+function quiz_supports($feature) {
+    switch($feature) {
+        case FEATURE_GROUPS:                    return true;
+        case FEATURE_GROUPINGS:                 return true;
+        case FEATURE_MOD_INTRO:                 return true;
+        case FEATURE_COMPLETION_TRACKS_VIEWS:   return true;
+        case FEATURE_COMPLETION_HAS_RULES:      return true;
+        case FEATURE_GRADE_HAS_GRADE:           return true;
+        case FEATURE_GRADE_OUTCOMES:            return true;
+        case FEATURE_BACKUP_MOODLE2:            return true;
+        case FEATURE_SHOW_DESCRIPTION:          return true;
+        case FEATURE_CONTROLS_GRADE_VISIBILITY: return true;
+        case FEATURE_USES_QUESTIONS:            return true;
+
+        default: return null;
+    }
+}
+
+/**
+ * @return array all other caps used in module
+ */
+function quiz_get_extra_capabilities() {
+    global $CFG;
+    require_once($CFG->libdir . '/questionlib.php');
+    $caps = question_get_all_capabilities();
+    $caps[] = 'moodle/site:accessallgroups';
+    return $caps;
+}
+
+/**
+ * This function extends the settings navigation block for the site.
+ *
+ * It is safe to rely on PAGE here as we will only ever be within the module
+ * context when this is called
+ *
+ * @param settings_navigation $settings
+ * @param navigation_node $quiznode
+ * @return void
+ */
+function quiz_extend_settings_navigation($settings, $quiznode) {
+    global $PAGE, $CFG;
+
+    // Require {@link questionlib.php}
+    // Included here as we only ever want to include this file if we really need to.
+    require_once($CFG->libdir . '/questionlib.php');
+
+    // We want to add these new nodes after the Edit settings node, and before the
+    // Locally assigned roles node. Of course, both of those are controlled by capabilities.
+    $keys = $quiznode->get_children_key_list();
+    $beforekey = null;
+    $i = array_search('modedit', $keys);
+    if ($i === false and array_key_exists(0, $keys)) {
+        $beforekey = $keys[0];
+    } else if (array_key_exists($i + 1, $keys)) {
+        $beforekey = $keys[$i + 1];
+    }
+
+    if (has_capability('mod/quiz:manageoverrides', $PAGE->cm->context)) {
+        $url = new moodle_url('/mod/quiz/overrides.php', array('cmid'=>$PAGE->cm->id));
+        $node = navigation_node::create(get_string('groupoverrides', 'quiz'),
+                new moodle_url($url, array('mode'=>'group')),
+                navigation_node::TYPE_SETTING, null, 'mod_quiz_groupoverrides');
+        $quiznode->add_node($node, $beforekey);
+
+        $node = navigation_node::create(get_string('useroverrides', 'quiz'),
+                new moodle_url($url, array('mode'=>'user')),
+                navigation_node::TYPE_SETTING, null, 'mod_quiz_useroverrides');
+        $quiznode->add_node($node, $beforekey);
+    }
+
+    if (has_capability('mod/quiz:manage', $PAGE->cm->context)) {
+        $node = navigation_node::create(get_string('editquiz', 'quiz'),
+                new moodle_url('/mod/quiz/edit.php', array('cmid'=>$PAGE->cm->id)),
+                navigation_node::TYPE_SETTING, null, 'mod_quiz_edit',
+                new pix_icon('t/edit', ''));
+        $quiznode->add_node($node, $beforekey);
+    }
+
+    if (has_capability('mod/quiz:preview', $PAGE->cm->context)) {
+        $url = new moodle_url('/mod/quiz/startattempt.php',
+                array('cmid'=>$PAGE->cm->id, 'sesskey'=>sesskey()));
+        $node = navigation_node::create(get_string('preview', 'quiz'), $url,
+                navigation_node::TYPE_SETTING, null, 'mod_quiz_preview',
+                new pix_icon('i/preview', ''));
+        $quiznode->add_node($node, $beforekey);
+    }
+
+    if (has_any_capability(array('mod/quiz:viewreports', 'mod/quiz:grade'), $PAGE->cm->context)) {
+        require_once($CFG->dirroot . '/mod/quiz/report/reportlib.php');
+        $reportlist = quiz_report_list($PAGE->cm->context);
+
+        $url = new moodle_url('/mod/quiz/report.php',
+                array('id' => $PAGE->cm->id, 'mode' => reset($reportlist)));
+        $reportnode = $quiznode->add_node(navigation_node::create(get_string('results', 'quiz'), $url,
+                navigation_node::TYPE_SETTING,
+                null, null, new pix_icon('i/report', '')), $beforekey);
+
+        foreach ($reportlist as $report) {
+            $url = new moodle_url('/mod/quiz/report.php',
+                    array('id' => $PAGE->cm->id, 'mode' => $report));
+            $reportnode->add_node(navigation_node::create(get_string($report, 'quiz_'.$report), $url,
+                    navigation_node::TYPE_SETTING,
+                    null, 'quiz_report_' . $report, new pix_icon('i/item', '')));
+        }
+    }
+
+    question_extend_settings_navigation($quiznode, $PAGE->cm->context)->trim_if_empty();
+}
+
+/**
+ * Serves the quiz files.
+ *
+ * @package  mod_quiz
+ * @category files
+ * @param stdClass $course course object
+ * @param stdClass $cm course module object
+ * @param stdClass $context context object
+ * @param string $filearea file area
+ * @param array $args extra arguments
+ * @param bool $forcedownload whether or not force download
+ * @param array $options additional options affecting the file serving
+ * @return bool false if file not found, does not return if found - justsend the file
+ */
+function quiz_pluginfile($course, $cm, $context, $filearea, $args, $forcedownload, array $options=array()) {
+    global $CFG, $DB;
+
+    if ($context->contextlevel != CONTEXT_MODULE) {
+        return false;
+    }
+
+    require_login($course, false, $cm);
+
+    if (!$quiz = $DB->get_record('quiz', array('id'=>$cm->instance))) {
+        return false;
+    }
+
+    // The 'intro' area is served by pluginfile.php.
+    $fileareas = array('feedback');
+    if (!in_array($filearea, $fileareas)) {
+        return false;
+    }
+
+    $feedbackid = (int)array_shift($args);
+    if (!$feedback = $DB->get_record('quiz_feedback', array('id'=>$feedbackid))) {
+        return false;
+    }
+
+    $fs = get_file_storage();
+    $relativepath = implode('/', $args);
+    $fullpath = "/$context->id/mod_quiz/$filearea/$feedbackid/$relativepath";
+    if (!$file = $fs->get_file_by_hash(sha1($fullpath)) or $file->is_directory()) {
+        return false;
+    }
+    send_stored_file($file, 0, 0, true, $options);
+}
+
+/**
+ * Called via pluginfile.php -> question_pluginfile to serve files belonging to
+ * a question in a question_attempt when that attempt is a quiz attempt.
+ *
+ * @package  mod_quiz
+ * @category files
+ * @param stdClass $course course settings object
+ * @param stdClass $context context object
+ * @param string $component the name of the component we are serving files for.
+ * @param string $filearea the name of the file area.
+ * @param int $qubaid the attempt usage id.
+ * @param int $slot the id of a question in this quiz attempt.
+ * @param array $args the remaining bits of the file path.
+ * @param bool $forcedownload whether the user must be forced to download the file.
+ * @param array $options additional options affecting the file serving
+ * @return bool false if file not found, does not return if found - justsend the file
+ */
+function quiz_question_pluginfile($course, $context, $component,
+        $filearea, $qubaid, $slot, $args, $forcedownload, array $options=array()) {
+    global $CFG;
+    require_once($CFG->dirroot . '/mod/quiz/locallib.php');
+
+    $attemptobj = quiz_attempt::create_from_usage_id($qubaid);
+    require_login($attemptobj->get_course(), false, $attemptobj->get_cm());
+
+    if ($attemptobj->is_own_attempt() && !$attemptobj->is_finished()) {
+        // In the middle of an attempt.
+        if (!$attemptobj->is_preview_user()) {
+            $attemptobj->require_capability('mod/quiz:attempt');
+        }
+        $isreviewing = false;
+
+    } else {
+        // Reviewing an attempt.
+        $attemptobj->check_review_capability();
+        $isreviewing = true;
+    }
+
+    if (!$attemptobj->check_file_access($slot, $isreviewing, $context->id,
+            $component, $filearea, $args, $forcedownload)) {
+        send_file_not_found();
+    }
+
+    $fs = get_file_storage();
+    $relativepath = implode('/', $args);
+    $fullpath = "/$context->id/$component/$filearea/$relativepath";
+    if (!$file = $fs->get_file_by_hash(sha1($fullpath)) or $file->is_directory()) {
+        send_file_not_found();
+    }
+
+    send_stored_file($file, 0, 0, $forcedownload, $options);
+}
+
+/**
+ * Return a list of page types
+ * @param string $pagetype current page type
+ * @param stdClass $parentcontext Block's parent context
+ * @param stdClass $currentcontext Current context of block
+ */
+function quiz_page_type_list($pagetype, $parentcontext, $currentcontext) {
+    $module_pagetype = array(
+        'mod-quiz-*'       => get_string('page-mod-quiz-x', 'quiz'),
+        'mod-quiz-view'    => get_string('page-mod-quiz-view', 'quiz'),
+        'mod-quiz-attempt' => get_string('page-mod-quiz-attempt', 'quiz'),
+        'mod-quiz-summary' => get_string('page-mod-quiz-summary', 'quiz'),
+        'mod-quiz-review'  => get_string('page-mod-quiz-review', 'quiz'),
+        'mod-quiz-edit'    => get_string('page-mod-quiz-edit', 'quiz'),
+        'mod-quiz-report'  => get_string('page-mod-quiz-report', 'quiz'),
+    );
+    return $module_pagetype;
+}
+
+/**
+ * @return the options for quiz navigation.
+ */
+function quiz_get_navigation_options() {
+    return array(
+        QUIZ_NAVMETHOD_FREE => get_string('navmethod_free', 'quiz'),
+        QUIZ_NAVMETHOD_SEQ  => get_string('navmethod_seq', 'quiz')
+    );
+}
+
+/**
+ * Obtains the automatic completion state for this quiz on any conditions
+ * in quiz settings, such as if all attempts are used or a certain grade is achieved.
+ *
+ * @param object $course Course
+ * @param object $cm Course-module
+ * @param int $userid User ID
+ * @param bool $type Type of comparison (or/and; can be used as return value if no conditions)
+ * @return bool True if completed, false if not. (If no conditions, then return
+ *   value depends on comparison type)
+ */
+function quiz_get_completion_state($course, $cm, $userid, $type) {
+    global $DB;
+    global $CFG;
+
+    $quiz = $DB->get_record('quiz', array('id' => $cm->instance), '*', MUST_EXIST);
+    if (!$quiz->completionattemptsexhausted && !$quiz->completionpass) {
+        return $type;
+    }
+
+    // Check if the user has used up all attempts.
+    if ($quiz->completionattemptsexhausted) {
+        $attempts = quiz_get_user_attempts($quiz->id, $userid, 'finished', true);
+        if ($attempts) {
+            $lastfinishedattempt = end($attempts);
+            $context = context_module::instance($cm->id);
+            $quizobj = quiz::create($quiz->id, $userid);
+            $accessmanager = new quiz_access_manager($quizobj, time(),
+                    has_capability('mod/quiz:ignoretimelimits', $context, $userid, false));
+            if ($accessmanager->is_finished(count($attempts), $lastfinishedattempt)) {
+                return true;
+            }
+        }
+    }
+
+    // Check for passing grade.
+    if ($quiz->completionpass) {
+        require_once($CFG->libdir . '/gradelib.php');
+        $item = grade_item::fetch(array('courseid' => $course->id, 'itemtype' => 'mod',
+                'itemmodule' => 'quiz', 'iteminstance' => $cm->instance, 'outcomeid' => null));
+        if ($item) {
+            $grades = grade_grade::fetch_users_grades($item, array($userid), false);
+            if (!empty($grades[$userid])) {
+                return $grades[$userid]->is_passed($item);
+            }
+        }
+    }
+    return false;
+}
+
+/**
+ * Check if the module has any update that affects the current user since a given time.
+ *
+ * @param  cm_info $cm course module data
+ * @param  int $from the time to check updates from
+ * @param  array $filter  if we need to check only specific updates
+ * @return stdClass an object with the different type of areas indicating if they were updated or not
+ * @since Moodle 3.2
+ */
+function quiz_check_updates_since(cm_info $cm, $from, $filter = array()) {
+    global $DB, $USER, $CFG;
+    require_once($CFG->dirroot . '/mod/quiz/locallib.php');
+
+    $updates = course_check_module_updates_since($cm, $from, array(), $filter);
+
+    // Check if questions were updated.
+    $updates->questions = (object) array('updated' => false);
+    $quizobj = quiz::create($cm->instance, $USER->id);
+    $quizobj->preload_questions();
+    $quizobj->load_questions();
+    $questionids = array_keys($quizobj->get_questions());
+    if (!empty($questionids)) {
+        list($questionsql, $params) = $DB->get_in_or_equal($questionids, SQL_PARAMS_NAMED);
+        $select = 'id ' . $questionsql . ' AND (timemodified > :time1 OR timecreated > :time2)';
+        $params['time1'] = $from;
+        $params['time2'] = $from;
+        $questions = $DB->get_records_select('question', $select, $params, '', 'id');
+        if (!empty($questions)) {
+            $updates->questions->updated = true;
+            $updates->questions->itemids = array_keys($questions);
+        }
+    }
+
+    // Check for new attempts or grades.
+    $updates->attempts = (object) array('updated' => false);
+    $updates->grades = (object) array('updated' => false);
+    $select = 'quiz = ? AND userid = ? AND timemodified > ?';
+    $params = array($cm->instance, $USER->id, $from);
+
+    $attempts = $DB->get_records_select('quiz_attempts', $select, $params, '', 'id');
+    if (!empty($attempts)) {
+        $updates->attempts->updated = true;
+        $updates->attempts->itemids = array_keys($attempts);
+    }
+    $grades = $DB->get_records_select('quiz_grades', $select, $params, '', 'id');
+    if (!empty($grades)) {
+        $updates->grades->updated = true;
+        $updates->grades->itemids = array_keys($grades);
+    }
+
+    // Now, teachers should see other students updates.
+    if (has_capability('mod/quiz:viewreports', $cm->context)) {
+        $select = 'quiz = ? AND timemodified > ?';
+        $params = array($cm->instance, $from);
+
+        if (groups_get_activity_groupmode($cm) == SEPARATEGROUPS) {
+            $groupusers = array_keys(groups_get_activity_shared_group_members($cm));
+            if (empty($groupusers)) {
+                return $updates;
+            }
+            list($insql, $inparams) = $DB->get_in_or_equal($groupusers);
+            $select .= ' AND userid ' . $insql;
+            $params = array_merge($params, $inparams);
+        }
+
+        $updates->userattempts = (object) array('updated' => false);
+        $attempts = $DB->get_records_select('quiz_attempts', $select, $params, '', 'id');
+        if (!empty($attempts)) {
+            $updates->userattempts->updated = true;
+            $updates->userattempts->itemids = array_keys($attempts);
+        }
+
+        $updates->usergrades = (object) array('updated' => false);
+        $grades = $DB->get_records_select('quiz_grades', $select, $params, '', 'id');
+        if (!empty($grades)) {
+            $updates->usergrades->updated = true;
+            $updates->usergrades->itemids = array_keys($grades);
+        }
+    }
+    return $updates;
+}
+
+/**
+ * Get icon mapping for font-awesome.
+ */
+function mod_quiz_get_fontawesome_icon_map() {
+    return [
+        'mod_quiz:navflagged' => 'fa-flag',
+    ];
+}
+
+/**
+ * This function receives a calendar event and returns the action associated with it, or null if there is none.
+ *
+ * This is used by block_myoverview in order to display the event appropriately. If null is returned then the event
+ * is not displayed on the block.
+ *
+ * @param calendar_event $event
+ * @param \core_calendar\action_factory $factory
+ * @return \core_calendar\local\event\entities\action_interface|null
+ */
+function mod_quiz_core_calendar_provide_event_action(calendar_event $event,
+                                                     \core_calendar\action_factory $factory) {
+    global $CFG, $USER;
+
+    require_once($CFG->dirroot . '/mod/quiz/locallib.php');
+
+    $cm = get_fast_modinfo($event->courseid)->instances['quiz'][$event->instance];
+    $quizobj = quiz::create($cm->instance, $USER->id);
+    $quiz = $quizobj->get_quiz();
+
+    // Check they have capabilities allowing them to view the quiz.
+    if (!has_any_capability(array('mod/quiz:reviewmyattempts', 'mod/quiz:attempt'), $quizobj->get_context())) {
+        return null;
+    }
+
+    quiz_update_effective_access($quiz, $USER->id);
+
+    // Check if quiz is closed, if so don't display it.
+    if (!empty($quiz->timeclose) && $quiz->timeclose <= time()) {
+        return null;
+    }
+
+    $attempts = quiz_get_user_attempts($quizobj->get_quizid(), $USER->id);
+    if (!empty($attempts)) {
+        // The student's last attempt is finished.
+        return null;
+    }
+
+    $name = get_string('attemptquiznow', 'quiz');
+    $url = new \moodle_url('/mod/quiz/view.php', [
+        'id' => $cm->id
+    ]);
+    $itemcount = 1;
+    $actionable = true;
+
+    // Check if the quiz is not currently actionable.
+    if (!empty($quiz->timeopen) && $quiz->timeopen > time()) {
+        $actionable = false;
+    }
+
+    return $factory->create_instance(
+        $name,
+        $url,
+        $itemcount,
+        $actionable
+    );
+}
+
+/**
+ * Add a get_coursemodule_info function in case any quiz type wants to add 'extra' information
+ * for the course (see resource).
+ *
+ * Given a course_module object, this function returns any "extra" information that may be needed
+ * when printing this activity in a course listing.  See get_array_of_activities() in course/lib.php.
+ *
+ * @param stdClass $coursemodule The coursemodule object (record).
+ * @return cached_cm_info An object on information that the courses
+ *                        will know about (most noticeably, an icon).
+ */
+function quiz_get_coursemodule_info($coursemodule) {
+    global $DB;
+
+    $dbparams = ['id' => $coursemodule->instance];
+    $fields = 'id, name, intro, introformat, completionattemptsexhausted, completionpass';
+    if (!$quiz = $DB->get_record('quiz', $dbparams, $fields)) {
+        return false;
+    }
+
+    $result = new cached_cm_info();
+    $result->name = $quiz->name;
+
+    if ($coursemodule->showdescription) {
+        // Convert intro to html. Do not filter cached version, filters run at display time.
+        $result->content = format_module_intro('quiz', $quiz, $coursemodule->id, false);
+    }
+
+    // Populate the custom completion rules as key => value pairs, but only if the completion mode is 'automatic'.
+    if ($coursemodule->completion == COMPLETION_TRACKING_AUTOMATIC) {
+        $result->customdata['customcompletionrules']['completionattemptsexhausted'] = $quiz->completionattemptsexhausted;
+        $result->customdata['customcompletionrules']['completionpass'] = $quiz->completionpass;
+    }
+
+    return $result;
+}
+
+/**
+ * Callback which returns human-readable strings describing the active completion custom rules for the module instance.
+ *
+ * @param cm_info|stdClass $cm object with fields ->completion and ->customdata['customcompletionrules']
+ * @return array $descriptions the array of descriptions for the custom rules.
+ */
+function mod_quiz_get_completion_active_rule_descriptions($cm) {
+    // Values will be present in cm_info, and we assume these are up to date.
+    if (empty($cm->customdata['customcompletionrules'])
+        || $cm->completion != COMPLETION_TRACKING_AUTOMATIC) {
+        return [];
+    }
+
+    $descriptions = [];
+    foreach ($cm->customdata['customcompletionrules'] as $key => $val) {
+        switch ($key) {
+            case 'completionattemptsexhausted':
+                if (empty($val)) {
+                    continue;
+                }
+                $descriptions[] = get_string('completionattemptsexhausteddesc', 'quiz');
+                break;
+            case 'completionpass':
+                if (empty($val)) {
+                    continue;
+                }
+                $descriptions[] = get_string('completionpassdesc', 'quiz', format_time($val));
+                break;
+            default:
+                break;
+        }
+    }
+    return $descriptions;
+}

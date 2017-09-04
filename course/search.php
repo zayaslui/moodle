@@ -1,94 +1,106 @@
-<?PHP // $Id$
+<?php
+// This file is part of Moodle - http://moodle.org/
+//
+// Moodle is free software: you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// Moodle is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU General Public License for more details.
+//
+// You should have received a copy of the GNU General Public License
+// along with Moodle.  If not, see <http://www.gnu.org/licenses/>.
 
-/// Displays external information about a course
+/**
+ * Displays external information about a course
+ * @package    core_course
+ * @copyright  1999 onwards Martin Dougiamas  http://dougiamas.com
+ * @license    http://www.gnu.org/copyleft/gpl.html GNU GPL v3 or later
+ */
 
-    require_once("../config.php");
-    require_once("lib.php");
+require_once("../config.php");
+require_once($CFG->dirroot.'/course/lib.php');
+require_once($CFG->libdir.'/coursecatlib.php');
 
-    optional_variable($search, "");    // search words
-    optional_variable($page, "0");     // which page to show
-    optional_variable($perpage, "10"); // how many per page
+$search    = optional_param('search', '', PARAM_RAW);  // search words
+$page      = optional_param('page', 0, PARAM_INT);     // which page to show
+$perpage   = optional_param('perpage', '', PARAM_RAW); // how many per page, may be integer or 'all'
+$blocklist = optional_param('blocklist', 0, PARAM_INT);
+$modulelist= optional_param('modulelist', '', PARAM_PLUGIN);
+$tagid     = optional_param('tagid', '', PARAM_INT);   // searches for courses tagged with this tag id
 
-    $search = trim(strip_tags($search));
+// List of minimum capabilities which user need to have for editing/moving course
+$capabilities = array('moodle/course:create', 'moodle/category:manage');
 
-    if ($search) {
-        $searchterms = explode(" ", $search);    // Search for words independently
-        foreach ($searchterms as $key => $searchterm) {
-            if (strlen($searchterm) < 2) {
-                unset($searchterms[$key]);
-            }
-        }
-        $search = trim(implode(" ", $searchterms));
+// Populate usercatlist with list of category id's with course:create and category:manage capabilities.
+$usercatlist = coursecat::make_categories_list($capabilities);
+
+$search = trim(strip_tags($search)); // trim & clean raw searched string
+
+$site = get_site();
+
+$searchcriteria = array();
+foreach (array('search', 'blocklist', 'modulelist', 'tagid') as $param) {
+    if (!empty($$param)) {
+        $searchcriteria[$param] = $$param;
     }
+}
+$urlparams = array();
+if ($perpage !== 'all' && !($perpage = (int)$perpage)) {
+    // default number of courses per page
+    $perpage = $CFG->coursesperpage;
+} else {
+    $urlparams['perpage'] = $perpage;
+}
+if (!empty($page)) {
+    $urlparams['page'] = $page;
+}
+$PAGE->set_url('/course/search.php', $searchcriteria + $urlparams);
+$PAGE->set_context(context_system::instance());
+$PAGE->set_pagelayout('standard');
+$courserenderer = $PAGE->get_renderer('core', 'course');
 
-    $site = get_site();
+if ($CFG->forcelogin) {
+    require_login();
+}
 
-    if ($CFG->forcelogin) {
-        require_login();
-    }
+$strcourses = new lang_string("courses");
+$strsearch = new lang_string("search");
+$strsearchresults = new lang_string("searchresults");
+$strnovalidcourses = new lang_string('novalidcourses');
 
-    $displaylist = array();
-    $parentlist = array();
-    make_categories_list($displaylist, $parentlist, "");
+$PAGE->navbar->add($strcourses, new moodle_url('/course/index.php'));
+$PAGE->navbar->add($strsearch, new moodle_url('/course/search.php'));
+if (!empty($search)) {
+    $PAGE->navbar->add(s($search));
+}
 
-    $strcourses = get_string("courses");
-    $strsearch = get_string("search");
-    $strsearchresults = get_string("searchresults");
-    $strcategory = get_string("category");
-
-    if (!$search) {
-        print_header("$site->fullname : $strsearch", $site->fullname, 
-                     "<a href=\"index.php\">$strcourses</a> -> $strsearch", "", "");
-        print_simple_box_start("center");
-        echo "<center>";
-        echo "<br />";
-        print_course_search("", false, "plain");
-        echo "<br /><p>";
-        print_string("searchhelp");
-        echo "</p>";
-        echo "</center>";
-        print_simple_box_end();
-        print_footer();
-        exit;
-    }
-
-    $searchform = print_course_search($search, true, "navbar");
-
-    print_header("$site->fullname : $strsearchresults", $site->fullname, 
-                 "<a href=\"index.php\">$strcourses</a> -> <a href=\"search.php\">$strsearch</a> -> '$search'", "", "", "", $searchform);
-
-
-    $lastcategory = -1;
-    if ($courses = get_courses_search($searchterms, "fullname ASC", 
-                                      $page*$perpage, $perpage, $totalcount)) {
-
-        print_heading("$strsearchresults: $totalcount");
-
-        print_paging_bar($totalcount, $page, $perpage, "search.php?search=$search&perpage=$perpage&");
-
-        foreach ($courses as $course) {
-            $course->fullname = highlight("$search", $course->fullname);
-            $course->summary = highlight("$search", $course->summary);
-            $course->summary .= "<br /><p align=\"right\">";
-            $course->summary .= "$strcategory: <a href=\"category.php?id=$course->category\">";
-            $course->summary .= $displaylist[$course->category];
-            $course->summary .= "</a></p>";
-            print_course($course);
-            print_spacer(5,5);
-        }
-
-        print_paging_bar($totalcount, $page, $perpage, "search.php?search=$search&perpage=$perpage&");
-
+if (empty($searchcriteria)) {
+    // no search criteria specified, print page with just search form
+    $PAGE->set_title("$site->fullname : $strsearch");
+} else {
+    // this is search results page
+    $PAGE->set_title("$site->fullname : $strsearchresults");
+    // Link to manage search results should be visible if user have system or category level capability
+    if ((can_edit_in_category() || !empty($usercatlist))) {
+        $aurl = new moodle_url('/course/management.php', $searchcriteria);
+        $searchform = $OUTPUT->single_button($aurl, get_string('managecourses'), 'get');
     } else {
-        print_heading(get_string("nocoursesfound", "", $search));
+        $searchform = $courserenderer->course_search_form($search, 'navbar');
     }
+    $PAGE->set_button($searchform);
 
-    echo "<br /><br />";
+    // Trigger event, courses searched.
+    $eventparams = array('context' => $PAGE->context, 'other' => array('query' => $search));
+    $event = \core\event\courses_searched::create($eventparams);
+    $event->trigger();
+}
 
-    print_course_search($search);
+$PAGE->set_heading($site->fullname);
 
-    print_footer();
-
-
-?>
-
+echo $OUTPUT->header();
+echo $courserenderer->search_courses($searchcriteria);
+echo $OUTPUT->footer();

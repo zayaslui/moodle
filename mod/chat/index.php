@@ -1,90 +1,106 @@
-<?PHP // $Id$
+<?php
+// This file is part of Moodle - http://moodle.org/
+//
+// Moodle is free software: you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// Moodle is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU General Public License for more details.
+//
+// You should have received a copy of the GNU General Public License
+// along with Moodle.  If not, see <http://www.gnu.org/licenses/>.
 
-    require_once("../../config.php");
-    require_once("lib.php");
+require_once('../../config.php');
+require_once('lib.php');
 
-    require_variable($id);   // course
+$id = required_param('id', PARAM_INT);   // Course.
 
-    if (! $course = get_record("course", "id", $id)) {
-        error("Course ID is incorrect");
-    }
+$PAGE->set_url('/mod/chat/index.php', array('id' => $id));
 
-    require_login($course->id);
+if (! $course = $DB->get_record('course', array('id' => $id))) {
+    print_error('invalidcourseid');
+}
 
-    add_to_log($course->id, "chat", "view all", "index.php?id=$course->id", "");
+require_course_login($course);
+$PAGE->set_pagelayout('incourse');
 
+$params = array(
+    'context' => context_course::instance($id)
+);
+$event = \mod_chat\event\course_module_instance_list_viewed::create($params);
+$event->add_record_snapshot('course', $course);
+$event->trigger();
 
-/// Get all required strings
+// Get all required strings.
+$strchats = get_string('modulenameplural', 'chat');
+$strchat  = get_string('modulename', 'chat');
 
-    $strchats = get_string("modulenameplural", "chat");
-    $strchat  = get_string("modulename", "chat");
+// Print the header.
+$PAGE->navbar->add($strchats);
+$PAGE->set_title($strchats);
+$PAGE->set_heading($course->fullname);
+echo $OUTPUT->header();
+echo $OUTPUT->heading($strchats, 2);
 
+// Get all the appropriate data.
+if (! $chats = get_all_instances_in_course('chat', $course)) {
+    notice(get_string('thereareno', 'moodle', $strchats), "../../course/view.php?id=$course->id");
+    die();
+}
 
-/// Print the header
+$usesections = course_format_uses_sections($course->format);
 
-    if ($course->category) {
-        $navigation = "<a href=\"../../course/view.php?id=$course->id\">$course->shortname</a> ->";
-    }
+// Print the list of instances (your module will probably extend this).
 
-    print_header("$course->shortname: $strchats", "$course->fullname", "$navigation $strchats", "", "", true, "", navmenu($course));
+$timenow  = time();
+$strname  = get_string('name');
 
-/// Get all the appropriate data
+$table = new html_table();
 
-    if (! $chats = get_all_instances_in_course("chat", $course)) {
-        notice("There are no chats", "../../course/view.php?id=$course->id");
-        die;
-    }
+if ($usesections) {
+    $strsectionname = get_string('sectionname', 'format_'.$course->format);
+    $table->head  = array ($strsectionname, $strname);
+    $table->align = array ('center', 'left');
+} else {
+    $table->head  = array ($strname);
+    $table->align = array ('left');
+}
 
-/// Print the list of instances (your module will probably extend this)
-
-    $timenow = time();
-    $strname  = get_string("name");
-    $strweek  = get_string("week");
-    $strtopic  = get_string("topic");
-
-    if ($course->format == "weeks") {
-        $table->head  = array ($strweek, $strname);
-        $table->align = array ("center", "left");
-    } else if ($course->format == "topics") {
-        $table->head  = array ($strtopic, $strname);
-        $table->align = array ("center", "left", "left", "left");
+$currentsection = '';
+foreach ($chats as $chat) {
+    if (!$chat->visible) {
+        // Show dimmed if the mod is hidden.
+        $link = "<a class=\"dimmed\" href=\"view.php?id=$chat->coursemodule\">".format_string($chat->name, true)."</a>";
     } else {
-        $table->head  = array ($strname);
-        $table->align = array ("left", "left", "left");
+        // Show normal if the mod is visible.
+        $link = "<a href=\"view.php?id=$chat->coursemodule\">".format_string($chat->name, true)."</a>";
     }
-
-    $currentsection = "";
-    foreach ($chats as $chat) {
-        if (!$chat->visible) {
-            //Show dimmed if the mod is hidden
-            $link = "<a class=\"dimmed\" href=\"view.php?id=$chat->coursemodule\">$chat->name</a>";
-        } else {
-            //Show normal if the mod is visible
-            $link = "<a href=\"view.php?id=$chat->coursemodule\">$chat->name</a>";
+    $printsection = '';
+    if ($chat->section !== $currentsection) {
+        if ($chat->section) {
+            $printsection = get_section_name($course, $chat->section);
         }
-        $printsection = "";
-        if ($chat->section !== $currentsection) {
-            if ($chat->section) {
-                $printsection = $chat->section;
-            }
-            if ($currentsection !== "") {
-                $table->data[] = 'hr';
-            }
-            $currentsection = $chat->section;
+        if ($currentsection !== '') {
+            $table->data[] = 'hr';
         }
-        if ($course->format == "weeks" or $course->format == "topics") {
-            $table->data[] = array ($printsection, $link);
-        } else {
-            $table->data[] = array ($link);
-        }
+        $currentsection = $chat->section;
     }
+    if ($usesections) {
+        $table->data[] = array ($printsection, $link);
+    } else {
+        $table->data[] = array ($link);
+    }
+}
 
-    echo "<br />";
+echo '<br />';
 
-    print_table($table);
+echo html_writer::table($table);
 
-/// Finish the page
+// Finish the page.
 
-    print_footer($course);
+echo $OUTPUT->footer();
 
-?>

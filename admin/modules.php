@@ -1,197 +1,161 @@
-<?PHP // $Id$
-      // Allows the admin to create, delete and rename course categories
+<?php
+      // Allows the admin to manage activity modules
 
-    require_once("../config.php");
-    require_once("../course/lib.php");
+    require_once('../config.php');
+    require_once('../course/lib.php');
+    require_once($CFG->libdir.'/adminlib.php');
+    require_once($CFG->libdir.'/tablelib.php');
 
-    optional_variable($disable);
-    optional_variable($enable);
-    optional_variable($delete);
-    optional_variable($confirm);
+    // defines
+    define('MODULE_TABLE','module_administration_table');
 
-    require_login();
+    admin_externalpage_setup('managemodules');
 
-    if (!isadmin()) {
-        error("Only administrators can use this page!");
-    }
-
-    if (!$site = get_site()) {
-        error("Site isn't defined!");
-    }
+    $show    = optional_param('show', '', PARAM_PLUGIN);
+    $hide    = optional_param('hide', '', PARAM_PLUGIN);
 
 
 /// Print headings
 
-    $stradministration = get_string("administration");
-    $strconfiguration = get_string("configuration");
-    $strmanagemodules = get_string("managemodules");
-    $strdelete = get_string("delete");
+    $stractivities = get_string("activities");
+    $struninstall = get_string('uninstallplugin', 'core_admin');
     $strversion = get_string("version");
     $strhide = get_string("hide");
     $strshow = get_string("show");
     $strsettings = get_string("settings");
     $stractivities = get_string("activities");
     $stractivitymodule = get_string("activitymodule");
-
-    print_header("$site->shortname: $strmanagemodules", "$site->fullname", 
-                 "<a href=\"index.php\">$stradministration</a> -> ".
-                 "<a href=\"configure.php\">$strconfiguration</a> -> $strmanagemodules");
-
-    print_heading($strmanagemodules);
-   
+    $strshowmodulecourse = get_string('showmodulecourse');
 
 /// If data submitted, then process and store.
 
-    if (!empty($hide)) {
-        if (!$module = get_record("modules", "name", $hide)) {
-            error("Module doesn't exist!");
+    if (!empty($hide) and confirm_sesskey()) {
+        if (!$module = $DB->get_record("modules", array("name"=>$hide))) {
+            print_error('moduledoesnotexist', 'error');
         }
-        set_field("modules", "visible", "0", "id", $module->id);            // Hide main module
-        set_field("course_modules", "visible", "0", "module", $module->id); // Hide all related activity modules
+        $DB->set_field("modules", "visible", "0", array("id"=>$module->id)); // Hide main module
+        // Remember the visibility status in visibleold
+        // and hide...
+        $sql = "UPDATE {course_modules}
+                   SET visibleold=visible, visible=0
+                 WHERE module=?";
+        $DB->execute($sql, array($module->id));
+        // Increment course.cacherev for courses where we just made something invisible.
+        // This will force cache rebuilding on the next request.
+        increment_revision_number('course', 'cacherev',
+                "id IN (SELECT DISTINCT course
+                                FROM {course_modules}
+                               WHERE visibleold=1 AND module=?)",
+                array($module->id));
+        core_plugin_manager::reset_caches();
+        admin_get_root(true, false);  // settings not required - only pages
     }
 
-    if (!empty($show)) {
-        if (!$module = get_record("modules", "name", $show)) {
-            error("Module doesn't exist!");
+    if (!empty($show) and confirm_sesskey()) {
+        if (!$module = $DB->get_record("modules", array("name"=>$show))) {
+            print_error('moduledoesnotexist', 'error');
         }
-        set_field("modules", "visible", "1", "id", $module->id);            // Show main module
-        set_field("course_modules", "visible", "1", "module", $module->id); // Show all related activity modules
+        $DB->set_field("modules", "visible", "1", array("id"=>$module->id)); // Show main module
+        $DB->set_field('course_modules', 'visible', '1', array('visibleold'=>1, 'module'=>$module->id)); // Get the previous saved visible state for the course module.
+        // Increment course.cacherev for courses where we just made something visible.
+        // This will force cache rebuilding on the next request.
+        increment_revision_number('course', 'cacherev',
+                "id IN (SELECT DISTINCT course
+                                FROM {course_modules}
+                               WHERE visible=1 AND module=?)",
+                array($module->id));
+        core_plugin_manager::reset_caches();
+        admin_get_root(true, false);  // settings not required - only pages
     }
 
-    if (!empty($delete)) {
-      
-        $strmodulename = get_string("modulename", "$delete");
-
-        if (empty($confirm)) {
-            notice_yesno(get_string("moduledeleteconfirm", "", $strmodulename), 
-                         "modules.php?delete=$delete&confirm=$delete", 
-                         "modules.php");
-            print_footer();
-            exit;
-
-        } else {  // Delete everything!!
-
-            if ($delete == "forum") {
-                error("You can not delete the forum module!!");
-            }
-
-            if (!$module = get_record("modules", "name", $delete)) {
-                error("Module doesn't exist!");
-            }
-
-            // OK, first delete all the relevant instances from all course sections
-            if ($coursemods = get_records("course_modules", "module", $module->id)) {
-                foreach ($coursemods as $coursemod) {
-                    if (! delete_mod_from_section($coursemod->id, $coursemod->section)) {
-                        notify("Could not delete the $strmodulename with id = $coursemod->id from section $coursemod->section");
-                    }
-                }
-            }
-
-            // Now delete all the course module records
-            if (!delete_records("course_modules", "module", $module->id)) {
-                notify("Error occurred while deleting all $strmodulename records in course_modules table");
-            }
-
-            // Then delete all the logs 
-            if (!delete_records("log", "module", $module->name)) {
-                notify("Error occurred while deleting all $strmodulename records in log table");
-            }
-
-            // And log_display information
-            if (!delete_records("log_display", "module", $module->name)) {
-                notify("Error occurred while deleting all $strmodulename records in log_display table");
-            }
-
-            // And the module entry itself
-            if (!delete_records("modules", "name", $module->name)) {
-                notify("Error occurred while deleting the $strmodulename record from modules table");
-            }
-
-            // Then the tables themselves
-
-            if ($tables = $db->Metatables()) {
-                $prefix = $CFG->prefix.$module->name;
-                foreach ($tables as $table) {
-                    if (strpos($table, $prefix) === 0) {
-                        if (!execute_sql("DROP TABLE $table", false)) {
-                            notify("ERROR: while trying to drop table $table");
-                        }
-                    }
-                }
-            }  
-
-            rebuild_course_cache();  // Because things have changed
-
-
-            $a->module = $strmodulename;
-            $a->directory = "$CFG->dirroot/mod/$delete";
-            notice(get_string("moduledeletefiles", "", $a), "modules.php");
-        }
-    }
+    echo $OUTPUT->header();
+    echo $OUTPUT->heading($stractivities);
 
 /// Get and sort the existing modules
 
-    if (!$modules = get_records("modules")) {
-        error("No modules found!!");        // Should never happen
+    if (!$modules = $DB->get_records('modules', array(), 'name ASC')) {
+        print_error('moduledoesnotexist', 'error');
     }
-
-    foreach ($modules as $module) {
-        $strmodulename = get_string("modulename", "$module->name");
-        $modulebyname[$strmodulename] = $module;
-    }
-    ksort($modulebyname);
 
 /// Print the table of all modules
+    // construct the flexible table ready to display
+    $table = new flexible_table(MODULE_TABLE);
+    $table->define_columns(array('name', 'instances', 'version', 'hideshow', 'uninstall', 'settings'));
+    $table->define_headers(array($stractivitymodule, $stractivities, $strversion, "$strhide/$strshow", $strsettings, $struninstall));
+    $table->define_baseurl($CFG->wwwroot.'/'.$CFG->admin.'/modules.php');
+    $table->set_attribute('id', 'modules');
+    $table->set_attribute('class', 'admintable generaltable');
+    $table->setup();
 
-    if (empty($THEME->custompix)) {
-        $pixpath = "../pix";
-        $modpixpath = "../mod";
-    } else {
-        $pixpath = "../theme/$CFG->theme/pix";
-        $modpixpath = "../theme/$CFG->theme/pix/mod";
-    }
+    foreach ($modules as $module) {
 
-    $table->head  = array ($stractivitymodule, $stractivities, $strversion, "$strhide/$strshow", $strdelete, $strsettings);
-    $table->align = array ("LEFT", "RIGHT", "LEFT", "CENTER", "CENTER", "CENTER");
-    $table->wrap = array ("NOWRAP", "", "", "", "","");
-    $table->size = array ("100%", "10", "10", "10", "10","12");
-    $table->width = "100";
+        if (!file_exists("$CFG->dirroot/mod/$module->name/lib.php")) {
+            $strmodulename = '<span class="notifyproblem">'.$module->name.' ('.get_string('missingfromdisk').')</span>';
+            $missing = true;
+        } else {
+            // took out hspace="\10\", because it does not validate. don't know what to replace with.
+            $icon = "<img src=\"" . $OUTPUT->image_url('icon', $module->name) . "\" class=\"icon\" alt=\"\" />";
+            $strmodulename = $icon.' '.get_string('modulename', $module->name);
+            $missing = false;
+        }
 
-    foreach ($modulebyname as $modulename => $module) {
+        $uninstall = '';
+        if ($uninstallurl = core_plugin_manager::instance()->get_uninstall_url('mod_'.$module->name, 'manage')) {
+            $uninstall = html_writer::link($uninstallurl, $struninstall);
+        }
 
-        $icon = "<img src=\"$modpixpath/$module->name/icon.gif\" hspace=10 height=16 width=16 border=0>";
-
-        $delete = "<a href=\"modules.php?delete=$module->name\">$strdelete</a>";
-
-        if (file_exists("$CFG->dirroot/mod/$module->name/config.html")) {
-            $settings = "<a href=\"module.php?module=$module->name\">$strsettings</a>";
+        if (file_exists("$CFG->dirroot/mod/$module->name/settings.php") ||
+                file_exists("$CFG->dirroot/mod/$module->name/settingstree.php")) {
+            $settings = "<a href=\"settings.php?section=modsetting$module->name\">$strsettings</a>";
         } else {
             $settings = "";
         }
 
-        $count = count_records("$module->name");
-
-        if ($module->visible) {
-            $visible = "<a href=\"modules.php?hide=$module->name\" title=\"$strhide\">".
-                       "<img src=\"$pixpath/i/hide.gif\" align=\"absmiddle\" height=16 width=16 border=0></a>";
-            $class = "";
+        try {
+            $count = $DB->count_records_select($module->name, "course<>0");
+        } catch (dml_exception $e) {
+            $count = -1;
+        }
+        if ($count>0) {
+            $countlink = "<a href=\"{$CFG->wwwroot}/course/search.php?modulelist=$module->name" .
+                "&amp;sesskey=".sesskey()."\" title=\"$strshowmodulecourse\">$count</a>";
+        } else if ($count < 0) {
+            $countlink = get_string('error');
         } else {
-            $visible = "<a href=\"modules.php?show=$module->name\" title=\"$strshow\">".
-                       "<img src=\"$pixpath/i/show.gif\" align=\"absmiddle\" height=16 width=16 border=0></a>";
-            $class = "class=\"dimmed_text\"";
+            $countlink = "$count";
+        }
+
+        if ($missing) {
+            $visible = '';
+            $class   = '';
+        } else if ($module->visible) {
+            $visible = "<a href=\"modules.php?hide=$module->name&amp;sesskey=".sesskey()."\" title=\"$strhide\">".
+                       $OUTPUT->pix_icon('t/hide', $strhide) . '</a>';
+            $class   = '';
+        } else {
+            $visible = "<a href=\"modules.php?show=$module->name&amp;sesskey=".sesskey()."\" title=\"$strshow\">".
+                       $OUTPUT->pix_icon('t/show', $strshow) . '</a>';
+            $class =   'dimmed_text';
         }
         if ($module->name == "forum") {
-            $delete = "";
+            $uninstall = "";
             $visible = "";
             $class = "";
         }
-        $table->data[] = array ("<p $class>$icon $modulename</p>", $count, $module->version, $visible, $delete, $settings);
+        $version = get_config('mod_'.$module->name, 'version');
+
+        $table->add_data(array(
+            $strmodulename,
+            $countlink,
+            $version,
+            $visible,
+            $settings,
+            $uninstall,
+        ), $class);
     }
-    print_table($table);
 
-    echo "<br /><br />";
+    $table->print_html();
 
-    print_footer();
+    echo $OUTPUT->footer();
 
-?>
+

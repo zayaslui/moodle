@@ -1,109 +1,113 @@
-<?PHP  // $Id$
+<?php
+// This file is part of Moodle - http://moodle.org/
+//
+// Moodle is free software: you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// Moodle is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU General Public License for more details.
+//
+// You should have received a copy of the GNU General Public License
+// along with Moodle.  If not, see <http://www.gnu.org/licenses/>.
 
-// This script uses installed report plugins to print quiz reports
+/**
+ * This script controls the display of the quiz reports.
+ *
+ * @package   mod_quiz
+ * @copyright 1999 onwards Martin Dougiamas  {@link http://moodle.com}
+ * @license   http://www.gnu.org/copyleft/gpl.html GNU GPL v3 or later
+ */
 
-    require_once("../../config.php");
-    require_once("lib.php");
+define('NO_OUTPUT_BUFFERING', true);
 
-    optional_variable($id);    // Course Module ID, or
-    optional_variable($q);     // quiz ID
+require_once(__DIR__ . '/../../config.php');
+require_once($CFG->dirroot . '/mod/quiz/locallib.php');
+require_once($CFG->dirroot . '/mod/quiz/report/reportlib.php');
+require_once($CFG->dirroot . '/mod/quiz/report/default.php');
 
-    optional_variable($mode, "overview");        // Report mode
+$id = optional_param('id', 0, PARAM_INT);
+$q = optional_param('q', 0, PARAM_INT);
+$mode = optional_param('mode', '', PARAM_ALPHA);
 
-    if ($id) {
-        if (! $cm = get_record("course_modules", "id", $id)) {
-            error("Course Module ID was incorrect");
-        }
-    
-        if (! $course = get_record("course", "id", $cm->course)) {
-            error("Course is misconfigured");
-        }
-    
-        if (! $quiz = get_record("quiz", "id", $cm->instance)) {
-            error("Course module is incorrect");
-        }
-
-    } else {
-        if (! $quiz = get_record("quiz", "id", $q)) {
-            error("Course module is incorrect");
-        }
-        if (! $course = get_record("course", "id", $quiz->course)) {
-            error("Course is misconfigured");
-        }
-        if (! $cm = get_coursemodule_from_instance("quiz", $quiz->id, $course->id)) {
-            error("Course Module ID was incorrect");
-        }
+if ($id) {
+    if (!$cm = get_coursemodule_from_id('quiz', $id)) {
+        print_error('invalidcoursemodule');
+    }
+    if (!$course = $DB->get_record('course', array('id' => $cm->course))) {
+        print_error('coursemisconf');
+    }
+    if (!$quiz = $DB->get_record('quiz', array('id' => $cm->instance))) {
+        print_error('invalidcoursemodule');
     }
 
-    require_login($course->id);
-
-    if (!isteacher($course->id)) {
-        error("You are not allowed to use this script");
+} else {
+    if (!$quiz = $DB->get_record('quiz', array('id' => $q))) {
+        print_error('invalidquizid', 'quiz');
     }
-
-    add_to_log($course->id, "quiz", "report", "report.php?id=$cm->id", "$quiz->id", "$cm->id");
-
-/// Print the page header
-    if (empty($noheader)) {
-
-        if ($course->category) {
-            $navigation = "<a href=\"../../course/view.php?id=$course->id\">$course->shortname</a> ->";
-        }
-    
-        $strquizzes = get_string("modulenameplural", "quiz");
-        $strquiz  = get_string("modulename", "quiz");
-        $strreport  = get_string("report", "quiz");
-    
-        print_header("$course->shortname: $quiz->name", "$course->fullname",
-                     "$navigation <A HREF=index.php?id=$course->id>$strquizzes</A> 
-                      -> <a href=\"view.php?id=$cm->id\">$quiz->name</a> -> $strreport", 
-                     "", "", true, update_module_button($cm->id, $course->id, $strquiz), navmenu($course, $cm));
-    
-        print_heading($quiz->name);
-    
-
-    /// Print list of available quiz reports
-    
-        $allreports = get_list_of_plugins("mod/quiz/report");
-        $reportlist = array ("overview", "regrade");   // Standard reports we want to show first
-
-        foreach ($allreports as $report) {
-            if (!in_array($report, $reportlist)) {
-                $reportlist[] = $report;
-            }
-        }
-
-        echo "<table cellpadding=10 align=center><tr>";
-        foreach ($reportlist as $report) {
-            $strreport = get_string("report$report", "quiz");
-            if ($report == $mode) {
-                echo "<td><u>$strreport</u></td>";
-            } else {
-                echo "<td><a href=\"report.php?id=$cm->id&mode=$report\">$strreport</a></td>";
-            }
-        }
-        echo "</tr></table><hr size=\"1\" noshade=\"noshade\" />";
+    if (!$course = $DB->get_record('course', array('id' => $quiz->course))) {
+        print_error('invalidcourseid');
     }
-
-
-/// Open the selected quiz report and display it
-
-    if (! is_readable("report/$mode/report.php")) {
-        error("Report not known ($mode)");
+    if (!$cm = get_coursemodule_from_instance("quiz", $quiz->id, $course->id)) {
+        print_error('invalidcoursemodule');
     }
+}
 
-    include("report/default.php");  // Parent class
-    include("report/$mode/report.php");
+$url = new moodle_url('/mod/quiz/report.php', array('id' => $cm->id));
+if ($mode !== '') {
+    $url->param('mode', $mode);
+}
+$PAGE->set_url($url);
 
-    $report = new quiz_report();
+require_login($course, false, $cm);
+$context = context_module::instance($cm->id);
+$PAGE->set_pagelayout('report');
 
-    if (! $report->display($quiz, $cm, $course)) {             // Run the report!
-        error("Error occurred during pre-processing!");
-    }
+$reportlist = quiz_report_list($context);
+if (empty($reportlist)) {
+    print_error('erroraccessingreport', 'quiz');
+}
 
-    if (empty($noheader)) {
-        print_footer($course);
-    }
+// Validate the requested report name.
+if ($mode == '') {
+    // Default to first accessible report and redirect.
+    $url->param('mode', reset($reportlist));
+    redirect($url);
+} else if (!in_array($mode, $reportlist)) {
+    print_error('erroraccessingreport', 'quiz');
+}
+if (!is_readable("report/$mode/report.php")) {
+    print_error('reportnotfound', 'quiz', '', $mode);
+}
 
+// Open the selected quiz report and display it.
+$file = $CFG->dirroot . '/mod/quiz/report/' . $mode . '/report.php';
+if (is_readable($file)) {
+    include_once($file);
+}
+$reportclassname = 'quiz_' . $mode . '_report';
+if (!class_exists($reportclassname)) {
+    print_error('preprocesserror', 'quiz');
+}
 
-?>
+$report = new $reportclassname();
+$report->display($quiz, $cm, $course);
+
+// Print footer.
+echo $OUTPUT->footer();
+
+// Log that this report was viewed.
+$params = array(
+    'context' => $context,
+    'other' => array(
+        'quizid' => $quiz->id,
+        'reportname' => $mode
+    )
+);
+$event = \mod_quiz\event\report_viewed::create($params);
+$event->add_record_snapshot('course', $course);
+$event->add_record_snapshot('quiz', $quiz);
+$event->trigger();

@@ -1,157 +1,185 @@
-<?PHP  // $Id$
+<?php
+// This file is part of Moodle - http://moodle.org/
+//
+// Moodle is free software: you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// Moodle is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU General Public License for more details.
+//
+// You should have received a copy of the GNU General Public License
+// along with Moodle.  If not, see <http://www.gnu.org/licenses/>.
 
-/// This page prints a particular instance of chat
+// This page prints a particular instance of chat.
 
-    require_once("../../config.php");
-    require_once("lib.php");
+require(__DIR__.'/../../config.php');
+require_once($CFG->dirroot . '/mod/chat/lib.php');
+require_once($CFG->libdir . '/completionlib.php');
 
-    optional_variable($id);    // Course Module ID, or
-    optional_variable($c);     // chat ID
+$id   = optional_param('id', 0, PARAM_INT);
+$c    = optional_param('c', 0, PARAM_INT);
+$edit = optional_param('edit', -1, PARAM_BOOL);
 
-    if ($id) {
-        if (! $cm = get_record("course_modules", "id", $id)) {
-            error("Course Module ID was incorrect");
+if ($id) {
+    if (! $cm = get_coursemodule_from_id('chat', $id)) {
+        print_error('invalidcoursemodule');
+    }
+
+    if (! $course = $DB->get_record('course', array('id' => $cm->course))) {
+        print_error('coursemisconf');
+    }
+
+    chat_update_chat_times($cm->instance);
+
+    if (! $chat = $DB->get_record('chat', array('id' => $cm->instance))) {
+        print_error('invalidid', 'chat');
+    }
+
+} else {
+    chat_update_chat_times($c);
+
+    if (! $chat = $DB->get_record('chat', array('id' => $c))) {
+        print_error('coursemisconf');
+    }
+    if (! $course = $DB->get_record('course', array('id' => $chat->course))) {
+        print_error('coursemisconf');
+    }
+    if (! $cm = get_coursemodule_from_instance('chat', $chat->id, $course->id)) {
+        print_error('invalidcoursemodule');
+    }
+}
+
+require_course_login($course, true, $cm);
+
+$context = context_module::instance($cm->id);
+$PAGE->set_context($context);
+
+// Show some info for guests.
+if (isguestuser()) {
+    $PAGE->set_title($chat->name);
+    echo $OUTPUT->header();
+    echo $OUTPUT->confirm('<p>'.get_string('noguests', 'chat').'</p>'.get_string('liketologin'),
+            get_login_url(), $CFG->wwwroot.'/course/view.php?id='.$course->id);
+
+    echo $OUTPUT->footer();
+    exit;
+}
+
+// Completion and trigger events.
+chat_view($chat, $course, $cm, $context);
+
+$strenterchat    = get_string('enterchat', 'chat');
+$stridle         = get_string('idle', 'chat');
+$strcurrentusers = get_string('currentusers', 'chat');
+$strnextsession  = get_string('nextsession', 'chat');
+
+$courseshortname = format_string($course->shortname, true, array('context' => context_course::instance($course->id)));
+$title = $courseshortname . ': ' . format_string($chat->name);
+
+// Initialize $PAGE.
+$PAGE->set_url('/mod/chat/view.php', array('id' => $cm->id));
+$PAGE->set_title($title);
+$PAGE->set_heading($course->fullname);
+
+// Print the page header.
+echo $OUTPUT->header();
+
+// Check to see if groups are being used here.
+$groupmode = groups_get_activity_groupmode($cm);
+$currentgroup = groups_get_activity_group($cm, true);
+
+// URL parameters.
+$params = array();
+if ($currentgroup) {
+    $groupselect = " AND groupid = '$currentgroup'";
+    $groupparam = "_group{$currentgroup}";
+    $params['groupid'] = $currentgroup;
+} else {
+    $groupselect = "";
+    $groupparam = "";
+}
+
+echo $OUTPUT->heading(format_string($chat->name), 2);
+
+if ($chat->intro) {
+    echo $OUTPUT->box(format_module_intro('chat', $chat, $cm->id), 'generalbox', 'intro');
+}
+
+groups_print_activity_menu($cm, $CFG->wwwroot . "/mod/chat/view.php?id=$cm->id");
+
+if (has_capability('mod/chat:chat', $context)) {
+    // Print the main part of the page.
+    echo $OUTPUT->box_start('generalbox', 'enterlink');
+
+    $now = time();
+    $span = $chat->chattime - $now;
+    if ($chat->chattime and $chat->schedule and ($span > 0)) {  // A chat is scheduled.
+        echo '<p>';
+        $chatinfo = new stdClass();
+        $chatinfo->date = userdate($chat->chattime);
+        $chatinfo->fromnow = format_time($span);
+        echo get_string('sessionstart', 'chat', $chatinfo);
+        echo '</p>';
+    }
+
+    $params['id'] = $chat->id;
+    $chattarget = new moodle_url("/mod/chat/gui_$CFG->chat_method/index.php", $params);
+    echo '<p>';
+    echo $OUTPUT->action_link($chattarget,
+                              $strenterchat,
+                              new popup_action('click', $chattarget, "chat{$course->id}_{$chat->id}{$groupparam}",
+                                               array('height' => 500, 'width' => 700)));
+    echo '</p>';
+
+    $params['id'] = $chat->id;
+    $link = new moodle_url('/mod/chat/gui_basic/index.php', $params);
+    $action = new popup_action('click', $link, "chat{$course->id}_{$chat->id}{$groupparam}",
+                               array('height' => 500, 'width' => 700));
+    echo '<p>';
+    echo $OUTPUT->action_link($link, get_string('noframesjs', 'message'), $action,
+                              array('title' => get_string('modulename', 'chat')));
+    echo '</p>';
+
+    if ($chat->studentlogs or has_capability('mod/chat:readlog', $context)) {
+        if ($msg = $DB->get_records_select('chat_messages', "chatid = ? $groupselect", array($chat->id))) {
+            echo '<p>';
+            echo html_writer::link(new moodle_url('/mod/chat/report.php', array('id' => $cm->id)),
+                                   get_string('viewreport', 'chat'));
+            echo '</p>';
         }
-    
-        if (! $course = get_record("course", "id", $cm->course)) {
-            error("Course is misconfigured");
-        }
-
-        chat_update_chat_times($cm->instance);
-    
-        if (! $chat = get_record("chat", "id", $cm->instance)) {
-            error("Course module is incorrect");
-        }
-
-    } else {
-        chat_update_chat_times($c);
-
-        if (! $chat = get_record("chat", "id", $c)) {
-            error("Course module is incorrect");
-        }
-        if (! $course = get_record("course", "id", $chat->course)) {
-            error("Course is misconfigured");
-        }
-        if (! $cm = get_coursemodule_from_instance("chat", $chat->id, $course->id)) {
-            error("Course Module ID was incorrect");
-        }
     }
 
-    require_login($course->id);
+    echo $OUTPUT->box_end();
 
-    add_to_log($course->id, "chat", "view", "view.php?id=$cm->id", $chat->id, $cm->id);
+} else {
+    echo $OUTPUT->box_start('generalbox', 'notallowenter');
+    echo '<p>'.get_string('notallowenter', 'chat').'</p>';
+    echo $OUTPUT->box_end();
+}
 
-/// Print the page header
+chat_delete_old_users();
 
-    if ($course->category) {
-        $navigation = "<A HREF=\"../../course/view.php?id=$course->id\">$course->shortname</A> ->";
+if ($chatusers = chat_get_users($chat->id, $currentgroup, $cm->groupingid)) {
+    $timenow = time();
+    echo $OUTPUT->box_start('generalbox', 'chatcurrentusers');
+    echo $OUTPUT->heading($strcurrentusers, 3);
+    echo '<table>';
+    foreach ($chatusers as $chatuser) {
+        $lastping = $timenow - $chatuser->lastmessageping;
+        echo '<tr><td class="chatuserimage">';
+        $url = new moodle_url('/user/view.php', array('id' => $chatuser->id, 'course' => $chat->course));
+        echo html_writer::link($url, $OUTPUT->user_picture($chatuser));
+        echo '</td><td class="chatuserdetails">';
+        echo '<p>'.fullname($chatuser).'</p>';
+        echo '<span class="idletime">'.$stridle.': '.format_time($lastping).'</span>';
+        echo '</td></tr>';
     }
+    echo '</table>';
+    echo $OUTPUT->box_end();
+}
 
-    $strchats = get_string("modulenameplural", "chat");
-    $strchat  = get_string("modulename", "chat");
-    $strenterchat  = get_string("enterchat", "chat");
-    $stridle  = get_string("idle", "chat");
-    $strcurrentusers  = get_string("currentusers", "chat");
-    $strnextsession  = get_string("nextsession", "chat");
-
-    print_header("$course->shortname: $chat->name", "$course->fullname",
-                 "$navigation <A HREF=index.php?id=$course->id>$strchats</A> -> $chat->name", 
-                  "", "", true, update_module_button($cm->id, $course->id, $strchat), 
-                  navmenu($course, $cm));
-
-    if (($chat->studentlogs or isteacher($course->id)) and !isguest()) {
-        echo "<p align=right><a href=\"report.php?id=$cm->id\">".
-              get_string("viewreport", "chat")."</a></p>";
-    }
-
-    print_heading($chat->name);
-
-/// Check to see if groups are being used here
-    if ($groupmode = groupmode($course, $cm)) {   // Groups are being used
-        $currentgroup = setup_and_print_groups($course, $groupmode, "view.php?id=$cm->id");
-    } else {
-        $currentgroup = false;
-    }
-
-    if ($currentgroup) {
-        $groupselect = " AND groupid = '$currentgroup'";
-        $groupparam = "&groupid=$currentgroup";
-    } else {
-        $groupselect = "";
-        $groupparam = "";
-    }
-
-/// Print the main part of the page
-
-   // Do the browser-detection etc later on.
-    $chatversion = "header_js";
-
-   // $browser = chat_browser_detect($HTTP_USER_AGENT);
-
-   // print_object($browser);
-
-   //if ($CFG->chatsocketserver == true) {
-   //    chat_display_version("sockets", $browser);
-   //} else {
-   //    chat_display_version("push_js", $browser);
-   // }
-   // chat_display_version("header_js", $browser);
-   // chat_display_version("header", $browser);
-   // chat_display_version("box", $browser);
-   // chat_display_version("text", $browser);
-
-
-    if (!isguest()) {
-        print_simple_box_start("center");
-        link_to_popup_window ("/mod/chat/gui_$chatversion/index.php?id=$chat->id$groupparam", 
-                              "chat$course->id$chat->id$groupparam", "$strenterchat", 500, 700, $strchat);
-        print_simple_box_end();
-    }
-
-
-    if ($chat->chattime and $chat->schedule) {  // A chat is scheduled
-        if (abs($USER->timezone) > 13) {
-            $timezone = get_string("serverlocaltime");
-        } else if ($USER->timezone < 0) {
-            $timezone = "GMT".$USER->timezone;
-        } else {
-            $timezone = "GMT+".$USER->timezone;
-        }
-        echo "<p align=\"center\">$strnextsession: ".userdate($chat->chattime)." ($timezone)</p>";
-    } else {
-        echo "<br />";
-    }
-
-    if ($chat->intro) {
-        print_simple_box( format_text($chat->intro) , "center");
-        echo "<br />";
-    }
-
-    chat_delete_old_users();
-
-    if ($chatusers = chat_get_users($chat->id, $currentgroup)) {
-        $timenow = time();
-        print_simple_box_start("center");
-        print_heading($strcurrentusers);
-        echo "<table width=\"100%\">";
-        foreach ($chatusers as $chatuser) {
-            $lastping = $timenow - $chatuser->lastmessageping;
-            echo "<tr><td width=35>";
-            echo "<a href=\"$CFG->wwwroot/user/view.php?id=$chatuser->id&course=$chat->course\">";
-            print_user_picture($chatuser->id, 0, $chatuser->picture, false, false, false);
-            echo "</a></td><td valign=center>";
-            echo "<p><font size=1>";
-            echo "$chatuser->firstname $chatuser->lastname<br />";
-            echo "<font color=\"#888888\">$stridle: ".format_time($lastping, $str)."</font>";
-            echo "</font></p>";
-            echo "<td></tr>";
-        }
-        echo "</table>";
-        print_simple_box_end();
-    }
-
-
-/// Finish the page
-    print_footer($course);
-
-?>
+echo $OUTPUT->footer();

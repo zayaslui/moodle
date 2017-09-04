@@ -1,57 +1,55 @@
-<?php   // $Id$
+<?php
 
-    include("../config.php");
+    require_once('../config.php');
+
+    $zone = optional_param('zone', '', PARAM_RAW);
+
+    if (!is_numeric($zone)) {
+         //not a path, but it looks like it anyway
+         $zone = clean_param($zone, PARAM_PATH);
+    }
+
+    $PAGE->set_url('/admin/timezone.php');
+    $PAGE->set_context(context_system::instance());
 
     require_login();
 
-    if (!isadmin()) {
-        error("You must be an admin");
-    }
+    require_capability('moodle/site:config', context_system::instance());
 
     $strtimezone = get_string("timezone");
     $strsavechanges = get_string("savechanges");
     $strusers = get_string("users");
     $strall = get_string("all");
 
-    print_header($strtimezone, $strtimezone, $strtimezone);
+    $PAGE->set_title($strtimezone);
+    $PAGE->set_heading($strtimezone);
+    $PAGE->navbar->add($strtimezone);
+    echo $OUTPUT->header();
 
-    print_heading("");
+    echo $OUTPUT->heading("");
 
-    if (isset($zone)) {
-        $db->debug = true;
+    if (data_submitted() and !empty($zone) and confirm_sesskey()) {
         echo "<center>";
-        execute_sql("UPDATE {$CFG->prefix}user SET timezone = '$zone'");
-        $db->debug = false;
+        $DB->execute("UPDATE {user} SET timezone = ?", array($zone));
         echo "</center>";
 
         $USER->timezone = $zone;
+        $current = $zone;
+        echo $OUTPUT->notification('Timezone of all users changed', 'notifysuccess');
+    } else {
+        $current = 99;
     }
 
-    $user = $USER;
+    require_once($CFG->dirroot.'/calendar/lib.php');
+    $timezones = core_date::get_list_of_timezones(null, true);
 
-    if (abs($user->timezone) > 13) {
-        $user->timezone = 99;
-    }
-    $timenow = time();
+    echo '<center><form action="timezone.php" method="post">';
+    echo html_writer::label($strusers . ' (' . $strall . '): ', 'menuzone');
+    echo html_writer::select($timezones, "zone", $current);
+    echo "<input type=\"hidden\" name=\"sesskey\" value=\"".sesskey()."\" />";
+    echo '<input type="submit" value="'.s($strsavechanges).'" />';
+    echo "</form></center>";
 
-    for ($tz = -26; $tz <= 26; $tz++) {
-        $zone = (float)$tz/2.0;
-        $usertime = $timenow + ($tz * 1800);
-        if ($tz == 0) {
-            $timezones["$zone"] = gmstrftime("%a, %I:%M %p", $usertime)." (GMT)";
-        } else if ($tz < 0) {
-            $timezones["$zone"] = gmstrftime("%a, %I:%M %p", $usertime)." (GMT$zone)";
-        } else {
-            $timezones["$zone"] = gmstrftime("%a, %I:%M %p", $usertime)." (GMT+$zone)";
-        }
-    }
+    echo $OUTPUT->footer();
 
-    echo "<center><form action=timezone.php method=get>";
-    echo "$strusers ($strall): ";
-    choose_from_menu ($timezones, "zone", $user->timezone, get_string("serverlocaltime"), "", "99");
-    echo "<input type=submit value=\"$strsavechanges\">";
-    echo "</form>";
 
-    print_footer();
-
-?>

@@ -1,192 +1,190 @@
-<?PHP // $Id$
+<?php
+// This file is part of Moodle - http://moodle.org/
+//
+// Moodle is free software: you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// Moodle is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU General Public License for more details.
+//
+// You should have received a copy of the GNU General Public License
+// along with Moodle.  If not, see <http://www.gnu.org/licenses/>.
 
-// Display user activity reports for a course
+/**
+ * Display user activity reports for a course
+ *
+ * @copyright 1999 Martin Dougiamas  http://dougiamas.com
+ * @license http://www.gnu.org/copyleft/gpl.html GNU GPL v3 or later
+ * @package course
+ */
 
-    require_once("../config.php");
-    require_once("lib.php");
+require_once("../config.php");
+require_once("lib.php");
 
-    $modes = array("outline", "complete", "todaylogs", "alllogs");
+$id      = required_param('id',PARAM_INT);       // course id
+$user    = required_param('user',PARAM_INT);     // user id
+$mode    = optional_param('mode', "todaylogs", PARAM_ALPHA);
 
-    require_variable($id);       // course id
-    require_variable($user);     // user id
-    optional_variable($mode, "todaylogs");
-    optional_variable($page, "0");
-    optional_variable($perpage, "100");
+$url = new moodle_url('/course/user.php', array('id'=>$id,'user'=>$user, 'mode'=>$mode));
 
-    require_login();
+$course = $DB->get_record('course', array('id'=>$id), '*', MUST_EXIST);
+$user = $DB->get_record("user", array("id"=>$user, 'deleted'=>0), '*', MUST_EXIST);
 
-    if (! $course = get_record("course", "id", $id)) {
-        error("Course id is incorrect.");
-    }
-
-    if (! $user = get_record("user", "id", $user)) {
-        error("User ID is incorrect");
-    }
-
-    if (! (isteacher($course->id) or ($course->showreports and $USER->id == $user->id))) {
-        error("You are not allowed to look at this page");
-    }
-
-    add_to_log($course->id, "course", "user report", "user.php?id=$course->id&user=$user->id&mode=$mode", "$user->id"); 
-
-    $stractivityreport = get_string("activityreport");
-    $strparticipants   = get_string("participants");
-    $stroutline        = get_string("outline");
-    $strcomplete       = get_string("complete");
-    $stralllogs        = get_string("alllogs");
-    $strtodaylogs      = get_string("todaylogs");
-    $strmode           = get_string($mode);
-    $fullname          = fullname($user, true);
-
-    if ($course->category) {
-        print_header("$course->shortname: $stractivityreport ($mode)", "$course->fullname",
-                 "<A HREF=\"../course/view.php?id=$course->id\">$course->shortname</A> ->
-                  <A HREF=\"../user/index.php?id=$course->id\">$strparticipants</A> ->
-                  <A HREF=\"../user/view.php?id=$user->id&course=$course->id\">$fullname</A> -> 
-                  $stractivityreport -> $strmode");
-    } else {
-        print_header("$course->shortname: $stractivityreport ($mode)", "$course->fullname",
-                 "<A HREF=\"../user/view.php?id=$user->id&course=$course->id\">$fullname</A> -> 
-                  $stractivityreport -> $strmode");
-    }
-    print_heading($fullname);
-
-    echo "<table cellpadding=10 align=center><tr>";
-    echo "<td>$stractivityreport: </td>";
-
-    foreach ($modes as $listmode) {
-        $strmode = get_string($listmode);
-        if ($mode == $listmode) {
-            echo "<td><u>$strmode</u></td>";
-        } else {
-            echo "<td><a href=user.php?id=$course->id&user=$user->id&mode=$listmode>$strmode</a></td>";
-        }
-    }
-    echo "</tr></table>";
-
-    get_all_mods($course->id, $mods, $modnames, $modnamesplural, $modnamesused);
-
-    switch ($mode) {
-        case "todaylogs" :
-            echo "<HR><CENTER>";
-            print_log_graph($course, $user->id, "userday.png");
-            echo "</CENTER>";
-            print_log($course, $user->id, usergetmidnight(time()), "l.time DESC", $page, $perpage, 
-                      "user.php?id=$course->id&user=$user->id&mode=$mode");
-            break;
-
-        case "alllogs" :
-            echo "<HR><CENTER>";
-            print_log_graph($course, $user->id, "usercourse.png");
-            echo "</CENTER>";
-            print_log($course, $user->id, 0, "l.time DESC", $page, $perpage, 
-                      "user.php?id=$course->id&user=$user->id&mode=$mode");
-            break;
-
-        case "outline" :
-        case "complete" :
-        default:
-            $sections = get_all_sections($course->id);
-
-            for ($i=0; $i<=$course->numsections; $i++) {
-
-                if (isset($sections[$i])) {   // should always be true
-
-                    $section = $sections[$i];
-        
-                    if ($section->sequence) {
-                        echo "<HR>";
-                        echo "<H2>";
-                        switch ($course->format) {
-                            case "weeks": print_string("week"); break;
-                            case "topics": print_string("topic"); break;
-                            default: print_string("section"); break;
-                        }
-                        echo " $i</H2>";
-
-                        echo "<UL>";
-
-                        if ($mode == "outline") {
-                            echo "<TABLE CELLPADDING=4 CELLSPACING=0>";
-                        }
-
-                        $sectionmods = explode(",", $section->sequence);
-                        foreach ($sectionmods as $sectionmod) {
-                            if (empty($mods[$sectionmod])) {
-                                continue;
-                            }
-                            $mod = $mods[$sectionmod];
-                            $instance = get_record("$mod->modname", "id", "$mod->instance");
-                            $libfile = "$CFG->dirroot/mod/$mod->modname/lib.php";
-
-                            if (file_exists($libfile)) {
-                                require_once($libfile);
-
-                                switch ($mode) {
-                                    case "outline":
-                                        $user_outline = $mod->modname."_user_outline";
-                                        if (function_exists($user_outline)) {
-                                            $output = $user_outline($course, $user, $mod, $instance);
-                                            print_outline_row($mod, $instance, $output);
-                                        }
-                                        break;
-                                    case "complete":
-                                        $user_complete = $mod->modname."_user_complete";
-                                        if (function_exists($user_complete)) {
-                                            $image = "<IMG SRC=\"../mod/$mod->modname/icon.gif\" ".
-                                                     "HEIGHT=16 WIDTH=16 ALT=\"$mod->modfullname\">";
-                                            echo "<H4>$image $mod->modfullname: ".
-                                                 "<A HREF=\"$CFG->wwwroot/mod/$mod->modname/view.php?id=$mod->id\">".
-                                                 "$instance->name</A></H4>";
-                                            echo "<UL>";
-                                            $user_complete($course, $user, $mod, $instance);
-                                            echo "</UL>";
-                                        }
-                                        break;
-                                }
-                            }
-                        }
-
-                        if ($mode == "outline") {
-                            echo "</TABLE>";
-                            print_simple_box_end();
-                        }
-                        echo "</UL>";
-
-                    
-                    }
-                }
-            }
-            break;
-    }
-
-
-    print_footer($course);
-
-
-function print_outline_row($mod, $instance, $result) {
-    $image = "<IMG SRC=\"../mod/$mod->modname/icon.gif\" HEIGHT=16 WIDTH=16 ALT=\"$mod->modfullname\">";
-
-    echo "<TR>";
-    echo "<TD VALIGN=top>$image</TD>";
-    echo "<TD VALIGN=top width=300>";
-    echo "   <A TITLE=\"$mod->modfullname\"";
-    echo "   HREF=\"../mod/$mod->modname/view.php?id=$mod->id\">$instance->name</A></TD>";
-    echo "<TD>&nbsp;&nbsp;&nbsp;</TD>";
-    echo "<TD VALIGN=top BGCOLOR=white>";
-    if (isset($result->info)) {
-        echo "$result->info";
-    } else {
-        echo "<P ALIGN=CENTER>-</P>";
-    }
-    echo "</TD>";
-    echo "<TD>&nbsp;&nbsp;&nbsp;</TD>";
-    if (isset($result->time)) {
-        $timeago = format_time(time() - $result->time);
-        echo "<TD VALIGN=top NOWRAP>".userdate($result->time)." ($timeago)</TD>";
-    }
-    echo "</TR>";
+if ($mode === 'outline' or $mode === 'complete') {
+    $url = new moodle_url('/report/outline/user.php', array('id'=>$user->id, 'course'=>$course->id, 'mode'=>$mode));
+    redirect($url);
+}
+if ($mode === 'todaylogs' or $mode === 'alllogs') {
+    $logmode = ($mode === 'todaylogs') ? 'today' : 'all';
+    $url = new moodle_url('/report/log/user.php', array('id'=>$user->id, 'course'=>$course->id, 'mode'=>$logmode));
+    redirect($url);
+}
+if ($mode === 'stats') {
+    $url = new moodle_url('/report/stats/user.php', array('id'=>$user->id, 'course'=>$course->id));
+    redirect($url);
+}
+if ($mode === 'coursecompletions' or $mode === 'coursecompletion') {
+    $url = new moodle_url('/report/completion/user.php', array('id'=>$user->id, 'course'=>$course->id));
+    redirect($url);
 }
 
-?>
+$coursecontext   = context_course::instance($course->id);
+$personalcontext = context_user::instance($user->id);
 
+$PAGE->set_context($personalcontext);
+
+$PAGE->set_url('/course/user.php', array('id'=>$id, 'user'=>$user->id, 'mode'=>$mode));
+
+require_login();
+$PAGE->set_pagelayout('report');
+if (has_capability('moodle/user:viewuseractivitiesreport', $personalcontext) and !is_enrolled($coursecontext)) {
+    // do not require parents to be enrolled in courses ;-)
+    $PAGE->set_course($course);
+} else {
+    require_login($course);
+}
+
+if ($user->deleted) {
+    echo $OUTPUT->header();
+    echo $OUTPUT->heading(get_string('userdeleted'));
+    echo $OUTPUT->footer();
+    die;
+}
+
+// prepare list of allowed modes
+$myreports  = ($course->showreports and $USER->id == $user->id);
+$anyreport  = has_capability('moodle/user:viewuseractivitiesreport', $personalcontext);
+
+$modes = array();
+
+// Used for grade reports, it represents whether we should be viewing the report as ourselves, or as the targetted user.
+$viewasuser = false;
+
+if (has_capability('moodle/grade:viewall', $coursecontext)) {
+    //ok - can view all course grades
+    $modes[] = 'grade';
+
+} else if ($course->showgrades and $user->id == $USER->id and has_capability('moodle/grade:view', $coursecontext)) {
+    //ok - can view own grades
+    $modes[] = 'grade';
+
+} else if ($course->showgrades and has_capability('moodle/grade:viewall', $personalcontext)) {
+    // ok - can view grades of this user - parent most probably
+    $modes[] = 'grade';
+    $viewasuser = true;
+
+} else if ($course->showgrades and $anyreport) {
+    // ok - can view grades of this user - parent most probably
+    $modes[] = 'grade';
+    $viewasuser = true;
+}
+
+if (empty($modes)) {
+    require_capability('moodle/user:viewuseractivitiesreport', $personalcontext);
+}
+
+if (!in_array($mode, $modes)) {
+    // forbidden or non-existent mode
+    $mode = reset($modes);
+}
+
+$eventdata = array(
+    'context' => $coursecontext,
+    'relateduserid' => $user->id,
+    'other' => array('mode' => $mode),
+);
+$event = \core\event\course_user_report_viewed::create($eventdata);
+$event->trigger();
+
+$stractivityreport = get_string("activityreport");
+
+$PAGE->navigation->extend_for_user($user);
+$PAGE->navigation->set_userid_for_parent_checks($user->id); // see MDL-25805 for reasons and for full commit reference for reversal when fixed.
+$PAGE->set_title("$course->shortname: $stractivityreport ($mode)");
+$PAGE->set_heading(fullname($user));
+
+switch ($mode) {
+    case "grade":
+        // Change the navigation to point to the my grade node (If we are a student).
+        if ($USER->id == $user->id) {
+            require_once($CFG->dirroot . '/user/lib.php');
+            // Make the dashboard active so that it shows up in the navbar correctly.
+            $gradenode = $PAGE->settingsnav->find('dashboard', null)->make_active();
+            // Get the correct 'Grades' url to point to.
+            $activeurl = user_mygrades_url();
+            $navbar = $PAGE->navbar->add(get_string('grades', 'grades'), $activeurl, navigation_node::TYPE_SETTING);
+            $activenode = $navbar->add($course->shortname);
+            $activenode->make_active();
+            // Find the course node and collapse it.
+            $coursenode = $PAGE->navigation->find($course->id, navigation_node::TYPE_COURSE);
+            $coursenode->collapse = true;
+            $coursenode->make_inactive();
+            $url = new moodle_url('/course/user.php', array('id' => $id, 'user' => $user->id, 'mode' => $mode));
+            $reportnode = $activenode->add(get_string('pluginname', 'gradereport_user'), $url);
+        } else {
+            if ($course->id == SITEID) {
+                $activenode = $PAGE->navigation->find('user' . $user->id, null);
+            } else {
+                $currentcoursenode = $PAGE->navigation->find($course->id, navigation_node::TYPE_COURSE);
+                $activenode = $currentcoursenode->find_active_node();
+            }
+
+            // Check to see if the active node is a user name.
+            if (!preg_match('/^user\d{0,}$/', $activenode->key)) { // No user name found.
+                $userurl = new moodle_url('/user/view.php', array('id' => $user->id, 'course' => $course->id));
+                // Add the user name.
+                $PAGE->navbar->add(fullname($user), $userurl, navigation_node::TYPE_SETTING);
+            }
+            $PAGE->navbar->add(get_string('report'));
+            $gradeurl = new moodle_url('/course/user.php', array('id' => $id, 'user' => $user->id, 'mode' => $mode));
+            // Add the 'grades' node to the navbar.
+            $navbar = $PAGE->navbar->add(get_string('grades', 'grades'), $gradeurl, navigation_node::TYPE_SETTING);
+        }
+        echo $OUTPUT->header();
+
+        if (empty($CFG->grade_profilereport) or !file_exists($CFG->dirroot.'/grade/report/'.$CFG->grade_profilereport.'/lib.php')) {
+            $CFG->grade_profilereport = 'user';
+        }
+        require_once $CFG->libdir.'/gradelib.php';
+        require_once $CFG->dirroot.'/grade/lib.php';
+        require_once $CFG->dirroot.'/grade/report/'.$CFG->grade_profilereport.'/lib.php';
+
+        $functionname = 'grade_report_'.$CFG->grade_profilereport.'_profilereport';
+        if (function_exists($functionname)) {
+            $functionname($course, $user, $viewasuser);
+        }
+        break;
+
+        break;
+    default:
+        // It's unlikely to reach this piece of code, as the mode is never empty and it sets mode as grade in most of the cases.
+        // Display the page header to avoid breaking the navigation. A course/user.php review will be done in MDL-49939.
+        echo $OUTPUT->header();
+}
+
+
+echo $OUTPUT->footer();

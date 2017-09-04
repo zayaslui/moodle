@@ -1,75 +1,89 @@
-<?PHP // $Id$
-      // Admin-only code to delete a course utterly
+<?php
+// This file is part of Moodle - http://moodle.org/
+//
+// Moodle is free software: you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// Moodle is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU General Public License for more details.
+//
+// You should have received a copy of the GNU General Public License
+// along with Moodle.  If not, see <http://www.gnu.org/licenses/>.
 
-	require_once("../config.php");
+/**
+ * Admin-only code to delete a course utterly.
+ *
+ * @package core_course
+ * @copyright 2002 onwards Martin Dougiamas (http://dougiamas.com)
+ * @license http://www.gnu.org/copyleft/gpl.html GNU GPL v3 or later
+ */
 
-    require_variable($id);       // course id
-    optional_variable($delete);   // delete confirmation
+require_once(__DIR__ . '/../config.php');
+require_once($CFG->dirroot . '/course/lib.php');
 
-    require_login();
+$id = required_param('id', PARAM_INT); // Course ID.
+$delete = optional_param('delete', '', PARAM_ALPHANUM); // Confirmation hash.
 
-    if (!isadmin()) {
-        error("You must be an administrator to use this page.");
-    }
+$course = $DB->get_record('course', array('id' => $id), '*', MUST_EXIST);
+$coursecontext = context_course::instance($course->id);
 
-    if (!$site = get_site()) {
-        error("Site not found!");
-    }
+require_login();
 
-    $strdeletecourse = get_string("deletecourse");
-    $stradministration = get_string("administration");
-    $strcategories = get_string("categories");
+if ($SITE->id == $course->id || !can_delete_course($id)) {
+    // Can not delete frontpage or don't have permission to delete the course.
+    print_error('cannotdeletecourse');
+}
 
-    if (! $course = get_record("course", "id", $id)) {
-        error("Course ID was incorrect (can't find it)");
-    }
+$categorycontext = context_coursecat::instance($course->category);
+$PAGE->set_url('/course/delete.php', array('id' => $id));
+$PAGE->set_context($categorycontext);
+$PAGE->set_pagelayout('admin');
+navigation_node::override_active_url(new moodle_url('/course/management.php', array('categoryid'=>$course->category)));
 
-    $category = get_record("course_categories", "id", $course->category);
+$courseshortname = format_string($course->shortname, true, array('context' => $coursecontext));
+$coursefullname = format_string($course->fullname, true, array('context' => $coursecontext));
+$categoryurl = new moodle_url('/course/management.php', array('categoryid' => $course->category));
 
-    if (! $delete) {
-        $strdeletecheck = get_string("deletecheck", "", $course->shortname);
-        $strdeletecoursecheck = get_string("deletecoursecheck");
+// Check if we've got confirmation.
+if ($delete === md5($course->timemodified)) {
+    // We do - time to delete the course.
+    require_sesskey();
 
-        
-	    print_header("$site->shortname: $strdeletecheck", $site->fullname, 
-                     "<a href=\"../$CFG->admin/index.php\">$stradministration</a> -> ".
-                     "<a href=\"index.php\">$strcategories</a> -> ".
-                     "<a href=\"category.php?id=$course->category\">$category->name</a> -> ".
-                     "$strdeletecheck");
+    $strdeletingcourse = get_string("deletingcourse", "", $courseshortname);
 
-        notice_yesno("$strdeletecoursecheck<BR><BR>$course->fullname ($course->shortname)", 
-                     "delete.php?id=$course->id&delete=".md5($course->timemodified), 
-                     "category.php?id=$course->category");
-        exit;
-    }
+    $PAGE->navbar->add($strdeletingcourse);
+    $PAGE->set_title("$SITE->shortname: $strdeletingcourse");
+    $PAGE->set_heading($SITE->fullname);
 
-    if ($delete != md5($course->timemodified)) {
-        error("The check variable was wrong - try again");
-    }
+    echo $OUTPUT->header();
+    echo $OUTPUT->heading($strdeletingcourse);
+    // This might take a while. Raise the execution time limit.
+    core_php_time_limit::raise();
+    // We do this here because it spits out feedback as it goes.
+    delete_course($course);
+    echo $OUTPUT->heading( get_string("deletedcourse", "", $courseshortname) );
+    // Update course count in categories.
+    fix_course_sortorder();
+    echo $OUTPUT->continue_button($categoryurl);
+    echo $OUTPUT->footer();
+    exit; // We must exit here!!!
+}
 
-    // OK checks done, delete the course now.
-    $strdeletingcourse = get_string("deletingcourse", "", $course->shortname);
+$strdeletecheck = get_string("deletecheck", "", $courseshortname);
+$strdeletecoursecheck = get_string("deletecoursecheck");
+$message = "{$strdeletecoursecheck}<br /><br />{$coursefullname} ({$courseshortname})";
 
-	print_header("$site->shortname: $strdeletingcourse", $site->fullname, 
-                 "<a href=\"../$CFG->admin/index.php\">$stradministration</a> -> ".
-                 "<a href=\"index.php\">$strcategories</a> -> ".
-                 "<a href=\"category.php?id=$course->category\">$category->name</a> -> ".
-                 "$strdeletingcourse");
+$continueurl = new moodle_url('/course/delete.php', array('id' => $course->id, 'delete' => md5($course->timemodified)));
+$continuebutton = new single_button($continueurl, get_string('delete'), 'post');
 
-    print_heading($strdeletingcourse);
-
-    if (!remove_course_contents($course->id)) {
-        notify("An error occurred while deleting some of the course contents.");
-    }
-
-    if (!delete_records("course", "id", $course->id)) {
-        notify("An error occurred while deleting the main course record.");
-    }
-
-    print_heading( get_string("deletedcourse", "", $course->shortname) );
-
-    print_continue("category.php?id=$course->category");
-
-    print_footer();
-
-?>
+$PAGE->navbar->add($strdeletecheck);
+$PAGE->set_title("$SITE->shortname: $strdeletecheck");
+$PAGE->set_heading($SITE->fullname);
+echo $OUTPUT->header();
+echo $OUTPUT->confirm($message, $continuebutton, $categoryurl);
+echo $OUTPUT->footer();
+exit;

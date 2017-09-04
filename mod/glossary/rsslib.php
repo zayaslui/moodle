@@ -1,211 +1,209 @@
-<?PHP  // $Id$
-    //This file adds support to rss feeds generation
+<?php
 
-    //This function is the main entry point to glossary
-    //rss feeds generation. Foreach site glossary with rss enabled
-    //build one XML rss structure.
-    function glossary_rss_feeds() {
+// This file is part of Moodle - http://moodle.org/
+//
+// Moodle is free software: you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// Moodle is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU General Public License for more details.
+//
+// You should have received a copy of the GNU General Public License
+// along with Moodle.  If not, see <http://www.gnu.org/licenses/>.
 
-        global $CFG;
 
-        $status = true;
+/**
+ * This file adds support to rss feeds generation
+ *
+ * @package mod_glossary
+ * @category rss
+ * @copyright  1999 onwards Martin Dougiamas  {@link http://moodle.com}
+ * @license    http://www.gnu.org/copyleft/gpl.html GNU GPL v3 or later
+ */
 
-        //Check CFG->enablerssfeeds
-        if (empty($CFG->enablerssfeeds)) {
-            //Some debug...
-            if ($CFG->debug > 7) {
-                echo "DISABLED (admin variables)";
-            }
-        //Check CFG->glossary_enablerssfeeds
-        } else if (empty($CFG->glossary_enablerssfeeds)) {
-            //Some debug...
-            if ($CFG->debug > 7) {
-                echo "DISABLED (module configuration)";
-            }
-        //It's working so we start...
-        } else {
-            //Iterate over all glossaries
-            if ($glossaries = get_records("glossary")) {
-                foreach ($glossaries as $glossary) {
-                    if (!empty($glossary->rsstype) && !empty($glossary->rssarticles) && $status) {
-                        //Some debug...
-                        if ($CFG->debug > 7) {
-                            echo "ID: $glossary->id->";
-                        }
-                        //Get the XML contents
-                        $result = glossary_rss_feed($glossary);
-                        //Save the XML contents to file
-                        if (!empty($result)) {
-                            $status = rss_save_file("glossary",$glossary,$result);
-                        }
-                        //Some debug...
-                        if ($CFG->debug > 7) {
-                            if (empty($result)) {
-                                echo "(empty) ";
-                            } else {
-                                if (!empty($status)) {
-                                    echo "OK ";
-                                } else {
-                                    echo "FAIL ";
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        return $status;
-    }
-
-    //This function return the XML rss contents about the glossary record passed as parameter
-    //It returns false if something is wrong
-    function glossary_rss_feed($glossary) {
-
-        global $CFG;
+/**
+ * Returns the path to the cached rss feed contents. Creates/updates the cache if necessary.
+ *
+ * @param stdClass $context the context
+ * @param array    $args    the arguments received in the url
+ * @return string the full path to the cached RSS feed directory. Null if there is a problem.
+ */
+    function glossary_rss_get_feed($context, $args) {
+        global $CFG, $DB, $COURSE, $USER;
 
         $status = true;
 
-        //Check CFG->enablerssfeeds
-        if (empty($CFG->enablerssfeeds)) {
-            //Some debug...
-            if ($CFG->debug > 7) {
-                echo "DISABLED (admin variables)"; 
-            }           
-        //Check CFG->glossary_enablerssfeeds
-        } else if (empty($CFG->glossary_enablerssfeeds)) {
-            //Some debug... 
-            if ($CFG->debug > 7) {
-                echo "DISABLED (module configuration)";
-            }           
-        //It's working so we start...
+        if (empty($CFG->glossary_enablerssfeeds)) {
+            debugging("DISABLED (module configuration)");
+            return null;
+        }
+
+        $glossaryid  = clean_param($args[3], PARAM_INT);
+        $cm = get_coursemodule_from_instance('glossary', $glossaryid, 0, false, MUST_EXIST);
+        $modcontext = context_module::instance($cm->id);
+
+        if ($COURSE->id == $cm->course) {
+            $course = $COURSE;
         } else {
-            //Check the glossary has rss activated
-            if (!empty($glossary->rsstype) && !empty($glossary->rssarticles)) {
-                //Depending of the glossary->rsstype, we are going to execute, different sqls
-                if ($glossary->rsstype == 1) {    //With author RSS
-                    $items = glossary_rss_feed_withauthor($glossary);
-                } else {                //Without author RSS
-                    $items = glossary_rss_feed_withoutauthor($glossary);
-     
-                }
-                //Now, if items, we begin building the structure
-                if (!empty($items)) {
-                    //First all rss feeds common headers
-                    $header = rss_standard_header($glossary->name,
-                                                  $CFG->wwwroot."/mod/glossary/view.php?f=".$glossary->id,
-                                                  $glossary->intro);
-                    //Now all the rss items
-                    if (!empty($header)) {
-                        $articles = rss_add_items($items);
-                    }
-                    //Now all rss feeds common footers
-                    if (!empty($header) && !empty($articles)) {
-                        $footer = rss_standard_footer();
-                    }
-                    //Now, if everything is ok, concatenate it
-                    if (!empty($header) && !empty($articles) && !empty($footer)) {
-                        $status = $header.$articles.$footer;
-                    } else {
-                        $status = false;
-                    } 
-                } else {
-                    $status = false;
-                }
-            }
+            $course = $DB->get_record('course', array('id'=>$cm->course), '*', MUST_EXIST);
         }
-        return $status;
-    }
+        //context id from db should match the submitted one
+        if ($context->id != $modcontext->id || !has_capability('mod/glossary:view', $modcontext)) {
+            return null;
+        }
 
-    //This function returns "items" record array to be used to build the rss feed
-    //for a Type=with author glossary
-    function glossary_rss_feed_withauthor($glossary) {
+        $glossary = $DB->get_record('glossary', array('id' => $glossaryid), '*', MUST_EXIST);
+        if (!rss_enabled_for_mod('glossary', $glossary)) {
+            return null;
+        }
 
-        global $CFG;
+        $sql = glossary_rss_get_sql($glossary);
 
-        $items = array();
+        //get the cache file info
+        $filename = rss_get_file_name($glossary, $sql);
+        $cachedfilepath = rss_get_file_full_name('mod_glossary', $filename);
 
-        if ($recs = get_records_sql ("SELECT e.id entryid, 
-                                             e.concept entryconcept, 
-                                             e.definition entrydefinition, 
-                                             e.format entryformat, 
-                                             e.timecreated entrytimecreated, 
-                                             u.id userid, 
-                                             u.firstname userfirstname,
-                                             u.lastname userlastname
-                                      FROM {$CFG->prefix}glossary_entries e,
-                                           {$CFG->prefix}user u
-                                      WHERE e.glossaryid = '$glossary->id' AND
-                                            u.id = e.userid AND
-                                            e.approved = 1
-                                      ORDER BY e.timecreated desc")) {
-            //Iterate over each entry to get glossary->rssarticles records
-            $articlesleft = $glossary->rssarticles;
-            $item = NULL;
-            $user = NULL;
+        //Is the cache out of date?
+        $cachedfilelastmodified = 0;
+        if (file_exists($cachedfilepath)) {
+            $cachedfilelastmodified = filemtime($cachedfilepath);
+        }
+        //if the cache is more than 60 seconds old and there's new stuff
+        $dontrecheckcutoff = time()-60;
+        if ( $dontrecheckcutoff > $cachedfilelastmodified && glossary_rss_newstuff($glossary, $cachedfilelastmodified)) {
+            if (!$recs = $DB->get_records_sql($sql, array(), 0, $glossary->rssarticles)) {
+                return null;
+            }
+
+            $items = array();
+
+            $formatoptions = new stdClass();
+            $formatoptions->trusttext = true;
+
             foreach ($recs as $rec) {
-                unset($item);
-                unset($user);
+                $item = new stdClass();
                 $item->title = $rec->entryconcept;
-                $user->firstname = $rec->userfirstname;
-                $user->lastname = $rec->userlastname;
-                $item->author = fullname($user);
+
+                if ($glossary->rsstype == 1) {//With author
+                    $item->author = fullname($rec);
+                }
+
                 $item->pubdate = $rec->entrytimecreated;
                 $item->link = $CFG->wwwroot."/mod/glossary/showentry.php?courseid=".$glossary->course."&eid=".$rec->entryid;
-                $item->description = format_text($rec->entrydefinition,$rec->entryformat,NULL,$glossary->course);
+
+                $definition = file_rewrite_pluginfile_urls($rec->entrydefinition, 'pluginfile.php',
+                    $modcontext->id, 'mod_glossary', 'entry', $rec->entryid);
+                $item->description = format_text($definition, $rec->entryformat, $formatoptions, $glossary->course);
                 $items[] = $item;
-                $articlesleft--;
-                if ($articlesleft < 1) {
-                    break;
-                }
+            }
+
+            //First all rss feeds common headers
+            $header = rss_standard_header(format_string($glossary->name,true),
+                                          $CFG->wwwroot."/mod/glossary/view.php?g=".$glossary->id,
+                                          format_string($glossary->intro,true));
+            //Now all the rss items
+            if (!empty($header)) {
+                $articles = rss_add_items($items);
+            }
+            //Now all rss feeds common footers
+            if (!empty($header) && !empty($articles)) {
+                $footer = rss_standard_footer();
+            }
+            //Now, if everything is ok, concatenate it
+            if (!empty($header) && !empty($articles) && !empty($footer)) {
+                $rss = $header.$articles.$footer;
+
+                //Save the XML contents to file.
+                $status = rss_save_file('mod_glossary', $filename, $rss);
             }
         }
-        return $items;
+
+        if (!$status) {
+            $cachedfilepath = null;
+        }
+
+        return $cachedfilepath;
     }
 
-    //This function returns "items" record array to be used to build the rss feed
-    //for a Type=without author glossary
-    function glossary_rss_feed_withoutauthor($glossary) {
+    /**
+     * The appropriate SQL query for the glossary items to go into the RSS feed
+     *
+     * @param stdClass $glossary the glossary object
+     * @param int      $time     check for items since this epoch timestamp
+     * @return string the SQL query to be used to get the entried from the glossary table of the database
+     */
+    function glossary_rss_get_sql($glossary, $time=0) {
+        //do we only want new items?
+        if ($time) {
+            $time = "AND e.timecreated > $time";
+        } else {
+            $time = "";
+        }
 
+        if ($glossary->rsstype == 1) {//With author
+            $allnamefields = get_all_user_name_fields(true,'u');
+            $sql = "SELECT e.id AS entryid,
+                      e.concept AS entryconcept,
+                      e.definition AS entrydefinition,
+                      e.definitionformat AS entryformat,
+                      e.definitiontrust AS entrytrust,
+                      e.timecreated AS entrytimecreated,
+                      u.id AS userid,
+                      $allnamefields
+                 FROM {glossary_entries} e,
+                      {user} u
+                WHERE e.glossaryid = {$glossary->id} AND
+                      u.id = e.userid AND
+                      e.approved = 1 $time
+             ORDER BY e.timecreated desc";
+        } else {//Without author
+            $sql = "SELECT e.id AS entryid,
+                      e.concept AS entryconcept,
+                      e.definition AS entrydefinition,
+                      e.definitionformat AS entryformat,
+                      e.definitiontrust AS entrytrust,
+                      e.timecreated AS entrytimecreated,
+                      u.id AS userid
+                 FROM {glossary_entries} e,
+                      {user} u
+                WHERE e.glossaryid = {$glossary->id} AND
+                      u.id = e.userid AND
+                      e.approved = 1 $time
+             ORDER BY e.timecreated desc";
+        }
+
+        return $sql;
+    }
+
+    /**
+     * If there is new stuff in since $time this returns true
+     * Otherwise it returns false.
+     *
+     * @param stdClass $glossary the glossary activity object
+     * @param int      $time     epoch timestamp to compare new items against, 0 for everyting
+     * @return bool true if there are new items
+     */
+    function glossary_rss_newstuff($glossary, $time) {
+        global $DB;
+
+        $sql = glossary_rss_get_sql($glossary, $time);
+
+        $recs = $DB->get_records_sql($sql, null, 0, 1);//limit of 1. If we get even 1 back we have new stuff
+        return ($recs && !empty($recs));
+    }
+
+    /**
+      * Given a glossary object, deletes all cached RSS files associated with it.
+      *
+      * @param stdClass $glossary
+      */
+    function glossary_rss_delete_file($glossary) {
         global $CFG;
+        require_once("$CFG->libdir/rsslib.php");
 
-        $items = array();
-
-        if ($recs = get_records_sql ("SELECT e.id entryid,
-                                             e.concept entryconcept,
-                                             e.definition entrydefinition,
-                                             e.format entryformat,
-                                             e.timecreated entrytimecreated,
-                                             u.id userid,
-                                             u.firstname userfirstname,
-                                             u.lastname userlastname
-                                      FROM {$CFG->prefix}glossary_entries e,
-                                           {$CFG->prefix}user u
-                                      WHERE e.glossaryid = '$glossary->id' AND
-                                            u.id = e.userid AND
-                                            e.approved = 1
-                                      ORDER BY e.timecreated desc")) {
-            //Iterate over each entry to get glossary->rssarticles records
-            $articlesleft = $glossary->rssarticles;
-            $item = NULL;
-            $user = NULL;
-            foreach ($recs as $rec) {
-                unset($item);
-                unset($user);
-                $item->title = $rec->entryconcept;
-                $user->firstname = $rec->userfirstname;
-                $user->lastname = $rec->userlastname;
-                //$item->author = fullname($user);
-                $item->pubdate = $rec->entrytimecreated;
-                $item->link = $CFG->wwwroot."/mod/glossary/showentry.php?courseid=".$glossary->course."&eid=".$rec->entryid;
-                $item->description = format_text($rec->entrydefinition,$rec->entryformat,NULL,$glossary->course);
-                $items[] = $item;
-                $articlesleft--;
-                if ($articlesleft < 1) {
-                    break;
-                }
-            }
-        }
-        return $items;
+        rss_delete_file('mod_glossary', $glossary);
     }
-    
-?>

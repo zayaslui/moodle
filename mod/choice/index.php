@@ -1,56 +1,62 @@
-<?PHP  // $Id$
+<?php
 
     require_once("../../config.php");
     require_once("lib.php");
 
-    require_variable($id);   // course
+    $id = required_param('id',PARAM_INT);   // course
 
-    if (! $course = get_record("course", "id", $id)) {
-        error("Course ID is incorrect");
+    $PAGE->set_url('/mod/choice/index.php', array('id'=>$id));
+
+    if (!$course = $DB->get_record('course', array('id'=>$id))) {
+        print_error('invalidcourseid');
     }
 
-    require_login($course->id);
+    require_course_login($course);
+    $PAGE->set_pagelayout('incourse');
 
-    add_to_log($course->id, "choice", "view all", "index?id=$course->id", "");
-
-    if ($course->category) {
-        $navigation = "<A HREF=\"../../course/view.php?id=$course->id\">$course->shortname</A> ->";
-    } else {
-        $navigation = "";
-    }
+    $eventdata = array('context' => context_course::instance($id));
+    $event = \mod_choice\event\course_module_instance_list_viewed::create($eventdata);
+    $event->add_record_snapshot('course', $course);
+    $event->trigger();
 
     $strchoice = get_string("modulename", "choice");
     $strchoices = get_string("modulenameplural", "choice");
-
-    print_header("$course->shortname: $strchoices", "$course->fullname",
-                 "$navigation $strchoices", "", "", true, "", navmenu($course));
-
+    $PAGE->set_title($strchoices);
+    $PAGE->set_heading($course->fullname);
+    $PAGE->navbar->add($strchoices);
+    echo $OUTPUT->header();
 
     if (! $choices = get_all_instances_in_course("choice", $course)) {
-        notice("There are no choices", "../../course/view.php?id=$course->id");
+        notice(get_string('thereareno', 'moodle', $strchoices), "../../course/view.php?id=$course->id");
     }
 
-    if ( $allanswers = get_records("choice_answers", "userid", $USER->id)) {
-        foreach ($allanswers as $aa) {
-            $answers[$aa->choice] = $aa;
-        }
+    $usesections = course_format_uses_sections($course->format);
 
-    } else {
-        $answers = array () ;
+    $sql = "SELECT cha.*
+              FROM {choice} ch, {choice_answers} cha
+             WHERE cha.choiceid = ch.id AND
+                   ch.course = ? AND cha.userid = ?";
+
+    $answers = array () ;
+    if (isloggedin() and !isguestuser() and $allanswers = $DB->get_records_sql($sql, array($course->id, $USER->id))) {
+        foreach ($allanswers as $aa) {
+            $answers[$aa->choiceid] = $aa;
+        }
+        unset($allanswers);
     }
 
 
     $timenow = time();
 
-    if ($course->format == "weeks") {
-        $table->head  = array (get_string("week"), get_string("question"), get_string("answer"));
-        $table->align = array ("CENTER", "LEFT", "LEFT");
-    } else if ($course->format == "topics") {
-        $table->head  = array (get_string("topic"), get_string("question"), get_string("answer"));
-        $table->align = array ("CENTER", "LEFT", "LEFT");
+    $table = new html_table();
+
+    if ($usesections) {
+        $strsectionname = get_string('sectionname', 'format_'.$course->format);
+        $table->head  = array ($strsectionname, get_string("question"), get_string("answer"));
+        $table->align = array ("center", "left", "left");
     } else {
         $table->head  = array (get_string("question"), get_string("answer"));
-        $table->align = array ("LEFT", "LEFT");
+        $table->align = array ("left", "left");
     }
 
     $currentsection = "";
@@ -61,40 +67,41 @@
         } else {
             $answer = "";
         }
-        if (!empty($answer->answer)) {
-            $aa = choice_get_answer($choice, $answer->answer);
+        if (!empty($answer->optionid)) {
+            $aa = format_string(choice_get_option_text($choice, $answer->optionid));
         } else {
             $aa = "";
         }
-        $printsection = "";
-        if ($choice->section !== $currentsection) {
-            if ($choice->section) {
-                $printsection = $choice->section;
+        if ($usesections) {
+            $printsection = "";
+            if ($choice->section !== $currentsection) {
+                if ($choice->section) {
+                    $printsection = get_section_name($course, $choice->section);
+                }
+                if ($currentsection !== "") {
+                    $table->data[] = 'hr';
+                }
+                $currentsection = $choice->section;
             }
-            if ($currentsection !== "") {
-                $table->data[] = 'hr';
-            }
-            $currentsection = $choice->section;
         }
-        
+
         //Calculate the href
         if (!$choice->visible) {
             //Show dimmed if the mod is hidden
-            $tt_href = "<a class=\"dimmed\" href=\"view.php?id=$choice->coursemodule\">$choice->name</a>";
+            $tt_href = "<a class=\"dimmed\" href=\"view.php?id=$choice->coursemodule\">".format_string($choice->name,true)."</a>";
         } else {
             //Show normal if the mod is visible
-            $tt_href = "<a href=\"view.php?id=$choice->coursemodule\">$choice->name</a>";
+            $tt_href = "<a href=\"view.php?id=$choice->coursemodule\">".format_string($choice->name,true)."</a>";
         }
-        if ($course->format == "weeks" || $course->format == "topics") {
+        if ($usesections) {
             $table->data[] = array ($printsection, $tt_href, $aa);
         } else {
             $table->data[] = array ($tt_href, $aa);
         }
     }
     echo "<br />";
-    print_table($table);
+    echo html_writer::table($table);
 
-    print_footer($course);
- 
-?>
+    echo $OUTPUT->footer();
+
 

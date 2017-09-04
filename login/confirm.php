@@ -1,69 +1,102 @@
-<?PHP // $Id$
+<?php
 
-    require_once("../config.php");
-    require_once("../auth/$CFG->auth/lib.php");
+// This file is part of Moodle - http://moodle.org/
+//
+// Moodle is free software: you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// Moodle is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU General Public License for more details.
+//
+// You should have received a copy of the GNU General Public License
+// along with Moodle.  If not, see <http://www.gnu.org/licenses/>.
 
-    if (isset($_GET['p']) and isset($_GET['s']) ) {     #  p = user.secret   s = user.username
+/**
+ * Confirm self registered user.
+ *
+ * @package    core
+ * @subpackage auth
+ * @copyright  1999 Martin Dougiamas  http://dougiamas.com
+ * @license    http://www.gnu.org/copyleft/gpl.html GNU GPL v3 or later
+ */
 
-        $user = get_user_info_from_db("username", "$s");
+require(__DIR__ . '/../config.php');
+require(__DIR__ . '/lib.php');
+require_once($CFG->libdir . '/authlib.php');
 
-        if (!empty($user)) {
+$data = optional_param('data', '', PARAM_RAW);  // Formatted as:  secret/username
 
-            if ($user->confirmed) {
-                print_header(get_string("alreadyconfirmed"), get_string("alreadyconfirmed"), "", "");
-                echo "<CENTER><H3>".get_string("thanks").", ". $user->firstname ." ". $user->lastname . "</H3>\n";
-                echo "<H4>".get_string("alreadyconfirmed")."</H4>\n";
-                echo "<H3> -> <A HREF=\"$CFG->wwwroot/course/\">".get_string("courses")."</A></H3>\n";
-                print_footer();
-                exit;
-            }
+$p = optional_param('p', '', PARAM_ALPHANUM);   // Old parameter:  secret
+$s = optional_param('s', '', PARAM_RAW);        // Old parameter:  username
+$redirect = optional_param('redirect', '', PARAM_LOCALURL);    // Where to redirect the browser once the user has been confirmed.
 
-            if ($user->secret == $p) {   // They have provided the secret key to get in
+$PAGE->set_url('/login/confirm.php');
+$PAGE->set_context(context_system::instance());
 
-                if (!set_field("user", "confirmed", 1, "id", $user->id)) {
-                    error("Could not confirm this user!");
-                }
-                if (!set_field("user", "firstaccess", time(), "id", $user->id)) {
-                    error("Could not set this user's first access date!");
-                }
-                if (isset($CFG->auth_user_create) and $CFG->auth_user_create==1 and function_exists('auth_user_activate') ) {
-				    if (!auth_user_activate($user->username)) {
-					  error("Could not activate this user!");
-					}
-                }
+if (!$authplugin = signup_get_user_confirmation_authplugin()) {
+    throw new moodle_exception('confirmationnotenabled');
+}
 
-                // The user has confirmed successfully, let's log them in
-                
-                if (!$USER = get_user_info_from_db("username", $user->username)) {
-                    error("Something serious is wrong with the database");
-                }
+if (!empty($data) || (!empty($p) && !empty($s))) {
 
-                set_moodle_cookie($USER->username);
-
-                $USER->loggedin = true;
-                $USER->site = $CFG->wwwroot;
-
-                if ( ! empty($SESSION->wantsurl) ) {   // Send them where they were going
-                    $goto = $SESSION->wantsurl;
-                    unset($SESSION->wantsurl);
-                    redirect("$goto");
-                }
- 
-                print_header(get_string("confirmed"), get_string("confirmed"), "", "");
-                echo "<CENTER><H3>".get_string("thanks").", ". $USER->firstname ." ". $USER->lastname . "</H3>\n";
-                echo "<H4>".get_string("confirmed")."</H4>\n";
-                echo "<H3> -> <A HREF=\"$CFG->wwwroot/course/\">".get_string("courses")."</A></H3>\n";
-                print_footer();
-                exit;
-
-            } else {
-                error("Invalid confirmation data");
-            }
-        }
+    if (!empty($data)) {
+        $dataelements = explode('/', $data, 2); // Stop after 1st slash. Rest is username. MDL-7647
+        $usersecret = $dataelements[0];
+        $username   = $dataelements[1];
     } else {
-        error(get_string("errorwhenconfirming"));
+        $usersecret = $p;
+        $username   = $s;
     }
 
-    redirect("$CFG->wwwroot/");
+    $confirmed = $authplugin->user_confirm($username, $usersecret);
 
-?>
+    if ($confirmed == AUTH_CONFIRM_ALREADY) {
+        $user = get_complete_user_data('username', $username);
+        $PAGE->navbar->add(get_string("alreadyconfirmed"));
+        $PAGE->set_title(get_string("alreadyconfirmed"));
+        $PAGE->set_heading($COURSE->fullname);
+        echo $OUTPUT->header();
+        echo $OUTPUT->box_start('generalbox centerpara boxwidthnormal boxaligncenter');
+        echo "<p>".get_string("alreadyconfirmed")."</p>\n";
+        echo $OUTPUT->single_button(core_login_get_return_url(), get_string('courses'));
+        echo $OUTPUT->box_end();
+        echo $OUTPUT->footer();
+        exit;
+
+    } else if ($confirmed == AUTH_CONFIRM_OK) {
+
+        // The user has confirmed successfully, let's log them in
+
+        if (!$user = get_complete_user_data('username', $username)) {
+            print_error('cannotfinduser', '', '', s($username));
+        }
+
+        if (!$user->suspended) {
+            complete_user_login($user);
+
+            \core\session\manager::apply_concurrent_login_limit($user->id, session_id());
+        }
+
+        $PAGE->navbar->add(get_string("confirmed"));
+        $PAGE->set_title(get_string("confirmed"));
+        $PAGE->set_heading($COURSE->fullname);
+        echo $OUTPUT->header();
+        echo $OUTPUT->box_start('generalbox centerpara boxwidthnormal boxaligncenter');
+        echo "<h3>".get_string("thanks").", ". fullname($USER) . "</h3>\n";
+        echo "<p>".get_string("confirmed")."</p>\n";
+        echo $OUTPUT->single_button(core_login_get_return_url(), get_string('continue'));
+        echo $OUTPUT->box_end();
+        echo $OUTPUT->footer();
+        exit;
+    } else {
+        print_error('invalidconfirmdata');
+    }
+} else {
+    print_error("errorwhenconfirming");
+}
+
+redirect("$CFG->wwwroot/");

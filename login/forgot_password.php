@@ -1,98 +1,93 @@
-<?PHP // $Id$
+<?php
+// This file is part of Moodle - http://moodle.org/
+//
+// Moodle is free software: you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// Moodle is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU General Public License for more details.
+//
+// You should have received a copy of the GNU General Public License
+// along with Moodle.  If not, see <http://www.gnu.org/licenses/>.
 
-	require_once("../config.php");
+/**
+ * Forgot password routine.
+ *
+ * Finds the user and calls the appropriate routine for their authentication type.
+ *
+ * There are several pathways to/through this page, summarised below:
+ * 1. User clicks the 'forgotten your username or password?' link on the login page.
+ *  - No token is received, render the username/email search form.
+ * 2. User clicks the link in the forgot password email
+ *  - Token received as GET param, store the token in session, redirect to self
+ * 3. Redirected from (2)
+ *  - Fetch token from session, and continue to run the reset routine defined in 'core_login_process_password_set()'.
+ *
+ * @package    core
+ * @subpackage auth
+ * @copyright  1999 onwards Martin Dougiamas  http://dougiamas.com
+ * @license    http://www.gnu.org/copyleft/gpl.html GNU GPL v3 or later
+ */
 
-    optional_variable($p, "");
-    optional_variable($s, "");
+require('../config.php');
+require_once($CFG->libdir.'/authlib.php');
+require_once(__DIR__ . '/lib.php');
+require_once('forgot_password_form.php');
+require_once('set_password_form.php');
 
-    if (!empty($p) and !empty($s)) {  // User trying to authenticate change password routine
+$token = optional_param('token', false, PARAM_ALPHANUM);
 
-		update_login_count();
+//HTTPS is required in this page when $CFG->loginhttps enabled
+$PAGE->https_required();
 
-        $user = get_user_info_from_db("username", "$s");
+$PAGE->set_url('/login/forgot_password.php');
+$systemcontext = context_system::instance();
+$PAGE->set_context($systemcontext);
 
-        if (!empty($user)) {
-            if ($user->secret == $p) {   // They have provided the secret key to get in
+// setup text strings
+$strforgotten = get_string('passwordforgotten');
+$strlogin     = get_string('login');
 
-                if (isguest($user->id)) {
-                    error("Can't change guest password!");
-                }
-    
-			    if (! reset_password_and_mail($user)) {
-                    error("Could not reset password and mail the new one to you");
-                }
-    
-			    reset_login_count();
+$PAGE->navbar->add($strlogin, get_login_url());
+$PAGE->navbar->add($strforgotten);
+$PAGE->set_title($strforgotten);
+$PAGE->set_heading($COURSE->fullname);
 
-	            print_header(get_string("passwordsent"), get_string("passwordsent"), get_string("passwordsent"));
-
-                $a->email = $user->email;
-                $a->link = "$CFG->wwwroot/login/change_password.php";
-                notice(get_string("emailpasswordsent", "", $a), $a->link);
-            }
-        }
-        error(get_string("error"));
-    }
-
-	if ($frm = data_submitted()) {    // Initial request for new password
-
-		validate_form($frm, $err);
-
-		if (count((array)$err) == 0) {
-
-			if (!$user = get_user_info_from_db("email", $frm->email)) {
-                error("No such user with this address:  $frm->email");
-            }
-
-            if (empty($user->confirmed)) {
-                error(get_string("confirmednot"));
-            }
-            
-            $user->secret = random_string(15);
-            
-			if (!set_field("user", "secret", $user->secret, "id", $user->id)) {
-                error("Could not set user secret string!");
-            }
-
-            if (! send_password_change_confirmation_email($user)) {
-                error("Could not send you an email to confirm the password change");
-            }
-
-	        print_header(get_string("passwordconfirmchange"), get_string("passwordconfirmchange"));
-            
-            notice(get_string('emailpasswordconfirmsent', '', $user->email), "$CFG->wwwroot/");
-        }
-	}
-
-	if (empty($frm->email)) {
-		if ($username = get_moodle_cookie() ) {
-			$frm->email = get_field("user", "email", "username", "$username");
-		}
-	}
-
-	print_header(get_string("senddetails"), get_string("senddetails"), 
-                 "<A HREF=\"$CFG->wwwroot/login/index.php\">".get_string("login")."</A> -> ".get_string("senddetails"), 
-                 "form.email");
-	include("forgot_password_form.html");
-    print_footer();
-
-
-/******************************************************************************
- * FUNCTIONS
- *****************************************************************************/
-
-function validate_form($frm, &$err) {
-
-    if (empty($frm->email))
-        $err->email = get_string("missingemail");
-
-    else if (! validate_email($frm->email))
-        $err->email = get_string("invalidemail");
-
-    else if (! record_exists("user", "email", $frm->email))
-        $err->email = get_string("nosuchemail");
-
+// if alternatepasswordurl is defined, then we'll just head there
+if (!empty($CFG->forgottenpasswordurl)) {
+    redirect($CFG->forgottenpasswordurl);
 }
 
+// if you are logged in then you shouldn't be here!
+if (isloggedin() and !isguestuser()) {
+    redirect($CFG->wwwroot.'/index.php', get_string('loginalready'), 5);
+}
 
-?>
+// Fetch the token from the session, if present, and unset the session var immediately.
+$tokeninsession = false;
+if (!empty($SESSION->password_reset_token)) {
+    $token = $SESSION->password_reset_token;
+    unset($SESSION->password_reset_token);
+    $tokeninsession = true;
+}
+
+if (empty($token)) {
+    // This is a new password reset request.
+    // Process the request; identify the user & send confirmation email.
+    core_login_process_password_reset_request();
+} else {
+    // A token has been found, but not in the session, and not from a form post.
+    // This must be the user following the original rest link, so store the reset token in the session and redirect to self.
+    // The session var is intentionally used only during the lifespan of one request (the redirect) and is unset above.
+    if (!$tokeninsession && $_SERVER['REQUEST_METHOD'] === 'GET') {
+        $SESSION->password_reset_token = $token;
+        redirect($CFG->httpswwwroot . '/login/forgot_password.php');
+    } else {
+        // Continue with the password reset process.
+        core_login_process_password_set($token);
+    }
+}

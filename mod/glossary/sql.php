@@ -3,234 +3,107 @@
 /**
  * SQL.PHP
  *    This file is include from view.php and print.php
- * @version $Id$
- * @copyright 2003 
+ * @copyright 2003
  **/
 
-/// Creating the SQL statements
+/**
+ * This file defines, or redefines, the following variables:
+ *
+ * bool $userispivot Whether the user is the pivot.
+ * bool $fullpivot Whether the pivot should be displayed in full.
+ * bool $printpivot Whether the pivot should be displayed.
+ * string $pivotkey The property of the record at which the pivot is.
+ * int $count The number of records matching the request.
+ * array $allentries The entries matching the request.
+ * mixed $field Unset in this file.
+ * mixed $entry Unset in this file.
+ * mixed $canapprove Unset in this file.
+ *
+ * It relies on the following variables:
+ *
+ * object $glossary The glossary object.
+ * context $context The glossary context.
+ * mixed $hook The hook for the selected tab.
+ * string $sortkey The key to sort the records.
+ * string $sortorder The order of the sorting.
+ * int $offset The number of records to skip.
+ * int $pagelimit The number of entries on this page, or 0 if unlimited.
+ * string $mode The mode of browsing.
+ * string $tab The tab selected.
+ */
 
-/// Pivot is the field that set the break by groups (category, initial, author name, etc)
+$userispivot = false;
+$fullpivot = true;
+$pivotkey = 'concept';
 
-/// fullpivot indicate if the whole pivot should be compared agasint the db or just the first letter
-/// printpivot indicate if the pivot should be printed or not
-    switch ($CFG->dbtype) {
-    case 'postgres7':
- 		$as = 'as';
-    break;
-    case 'mysql':
- 		$as = '';
-    break;
-    }    
+switch ($tab) {
 
-    switch ( $sortkey ) {    
-    case "CREATION": 
-        $sqlsortkey = "timecreated";
-    break;
-    
-    case "UPDATE": 
-        $sqlsortkey = "timemodified";
-    break;
-    }
-    $sqlsortorder = $sortorder;
-
-    $fullpivot = 1;
-
-    $userid = '';
-    if ( $USER->id ) {
-        $userid = "OR ge.userid = $USER->id";
-    }
-    switch ($tab) {
-    case GLOSSARY_CATEGORY_VIEW:
-        if ($hook == GLOSSARY_SHOW_ALL_CATEGORIES  ) { 
-
-            $sqlselect = "SELECT ge.*, gec.entryid, gc.name $as pivot";
-            $sqlfrom   = "FROM {$CFG->prefix}glossary_entries ge,
-                         {$CFG->prefix}glossary_entries_categories gec,
-                         {$CFG->prefix}glossary_categories gc";
-            $sqlwhere  = "WHERE (ge.glossaryid = '$glossary->id' OR ge.sourceglossaryid = '$glossary->id') AND
-                          ge.id = gec.entryid AND gc.id = gec.categoryid AND
-                          (ge.approved != 0 $userid)";
-
-            if ( $glossary->displayformat == GLOSSARY_FORMAT_CONTINUOUS ) {
-                $sqlorderby = ' ORDER BY gc.name, ge.timecreated';
-            } else {
-                $sqlorderby = ' ORDER BY gc.name, ge.concept';
-            }
-
-        } elseif ($hook == GLOSSARY_SHOW_NOT_CATEGORISED ) { 
-
-            $printpivot = 0;
-            $sqlselect = "SELECT ge.*, concept $as pivot";
-            $sqlfrom   = "FROM {$CFG->prefix}glossary_entries ge";
-            $sqlwhere  = "WHERE (glossaryid = '$glossary->id' OR sourceglossaryid = '$glossary->id') AND
-                          (ge.approved != 0 $userid)";
-
-
-            $sqlorderby = ' ORDER BY concept';
-
-        } else {
-
-            $printpivot = 0;
-            $sqlselect  = "SELECT ge.*, ce.entryid, c.name $as pivot";
-            $sqlfrom    = "FROM {$CFG->prefix}glossary_entries ge, {$CFG->prefix}glossary_entries_categories ce, {$CFG->prefix}glossary_categories c";
-            $sqlwhere   = "WHERE ge.id = ce.entryid AND ce.categoryid = $hook AND
-                                 ce.categoryid = c.id AND ge.approved != 0 AND
-                                 (ge.glossaryid = $glossary->id OR ge.sourceglossaryid = $glossary->id) AND
-                          (ge.approved != 0 $userid)";
-
-            $sqlorderby = ' ORDER BY c.name, ge.concept';
-
-        }
-    break;
     case GLOSSARY_AUTHOR_VIEW:
-
-        if (!isset($sqlsortkey)) {
-            $sqlsortkey = NULL;
-        }
-
-        $where = '';
-        switch ($CFG->dbtype) {
-        case 'postgres7':
-            $usernametoshow = "u.firstname || ' ' || u.lastname";
-            if ( $sqlsortkey == 'FIRSTNAME' ) {
-                $usernamefield = "u.firstname || ' ' || u.lastname";
-            } else {
-                $usernamefield = "u.lastname || ' ' || u.firstname";
-            }
-            $where = "AND substr(ucase($usernamefield),1," .  strlen($hook) . ") = '" . strtoupper($hook) . "'";
+        $userispivot = true;
+        $pivotkey = 'userid';
+        $field = ($sortkey == 'LASTNAME' ? 'LASTNAME' : 'FIRSTNAME');
+        list($allentries, $count) = glossary_get_entries_by_author($glossary, $context, $hook,
+            $field, $sortorder, $offset, $pagelimit);
+        unset($field);
         break;
-        case 'mysql':
-            if ( $sqlsortkey == 'FIRSTNAME' ) {
-                $usernamefield = "CONCAT(CONCAT(u.firstname,' '), u.lastname)";
-            } else {
-                $usernamefield = "CONCAT(CONCAT(u.lastname,' '), u.firstname)";
-            }
-            $where = "AND left(ucase($usernamefield)," .  strlen($hook) . ") = '$hook'";
+
+    case GLOSSARY_CATEGORY_VIEW:
+        $hook = (int) $hook; // Make sure it's properly casted to int.
+        list($allentries, $count) = glossary_get_entries_by_category($glossary, $context, $hook, $offset, $pagelimit);
+        $pivotkey = 'categoryname';
+        if ($hook != GLOSSARY_SHOW_ALL_CATEGORIES) {
+            $printpivot = false;
+        }
         break;
-        }
-        if ( $hook == 'ALL' ) {
-            $where = '';
-        }
 
-        $sqlselect  = "SELECT ge.id, $usernamefield $as pivot, u.id uid, ge.*";
-        $sqlfrom    = "FROM {$CFG->prefix}glossary_entries ge, {$CFG->prefix}user u";
-        $sqlwhere   = "WHERE ge.userid = u.id  AND
-                             (ge.approved != 0 $userid)
-                             $where AND 
-                             (ge.glossaryid = $glossary->id OR ge.sourceglossaryid = $glossary->id)";
-        $sqlorderby = "ORDER BY $usernamefield $sqlsortorder, ge.concept";
-    break;
-    case GLOSSARY_APPROVAL_VIEW:
-        $fullpivot = 0;
-        $printpivot = 0;
-
-        if (!isset($sqlsortkey)) {
-            $sqlsortkey = NULL;
-        }
-
-        $where = '';
-        if ($hook != 'ALL' and $hook != 'SPECIAL') {
-            switch ($CFG->dbtype) {
-            case 'postgres7':
-                $where = 'AND substr(ucase(concept),1,' .  strlen($hook) . ') = \'' . strtoupper($hook) . '\'';
-            break;
-            case 'mysql':
-                $where = 'AND left(ucase(concept),' .  strlen($hook) . ") = '$hook'";
-            break;
-            }
-        }
-
-        $sqlselect  = "SELECT ge.*, ge.concept $as pivot";
-        $sqlfrom    = "FROM {$CFG->prefix}glossary_entries ge";
-        $sqlwhere   = "WHERE (ge.glossaryid = $glossary->id OR ge.sourceglossaryid = $glossary->id) AND
-                             ge.approved = 0 $where";
-                             
-        if ( $sqlsortkey ) {
-            $sqlorderby = "ORDER BY $sqlsortkey $sqlsortorder";
-        } else {
-            $sqlorderby = "ORDER BY ge.concept";
-        }
-    break;
     case GLOSSARY_DATE_VIEW:
+        $printpivot = false;
+        $field = ($sortkey == 'CREATION' ? 'CREATION' : 'UPDATE');
+        list($allentries, $count) = glossary_get_entries_by_date($glossary, $context, $field, $sortorder,
+            $offset, $pagelimit);
+        unset($field);
+        break;
+
+    case GLOSSARY_APPROVAL_VIEW:
+        $fullpivot = false;
+        $printpivot = false;
+        list($allentries, $count) = glossary_get_entries_to_approve($glossary, $context, $hook, $sortkey, $sortorder,
+            $offset, $pagelimit);
+        break;
+
     case GLOSSARY_STANDARD_VIEW:
     default:
-        $sqlselect  = "SELECT ge.*, ge.concept $as pivot";
-        $sqlfrom    = "FROM {$CFG->prefix}glossary_entries ge";
-
-        $where = '';
-        $fullpivot = 0;
-        if ($CFG->dbtype == "postgres7") {
-            $LIKE = "ILIKE";   // case-insensitive
-        } else {
-            $LIKE = "LIKE";
-        }
-
-        switch ( $mode ) {
-        case 'search': 
-            $printpivot = 0;
-            $where = "AND ( ge.concept $LIKE '%$hook%'";
-            if ( $fullsearch ) {
-                $where .= "OR ge.definition $LIKE '%$hook%')";
-            } else {
-                $where .= ")";
-            }
-        break;
-        
-        case 'term': 
-            $printpivot = 0;
-            $sqlfrom .= " left join {$CFG->prefix}glossary_alias ga on ge.id = ga.entryid ";
-            $where = "AND (ge.concept = '$hook' OR ga.alias = '$hook' )
-                     ";
-        break;
-
-        case 'entry': 
-            $printpivot = 0;
-            $where = "AND ge.id = $hook";
-        break;
-
-        case 'letter': 
-            if ($hook != 'ALL' and $hook != 'SPECIAL') {
-                switch ($CFG->dbtype) {
-                case 'postgres7':
-                    $where = 'AND substr(ucase(concept),1,' .  strlen($hook) . ') = \'' . strtoupper($hook) . '\'';
+        $fullpivot = false;
+        switch ($mode) {
+            case 'search':
+                list($allentries, $count) = glossary_get_entries_by_search($glossary, $context, $hook, $fullsearch,
+                    $sortkey, $sortorder, $offset, $pagelimit);
                 break;
-                case 'mysql':
-                    $where = 'AND left(ucase(concept),' .  strlen($hook) . ") = '" . strtoupper($hook) . "'";
+
+            case 'term':
+                $printpivot = false;
+                list($allentries, $count) = glossary_get_entries_by_term($glossary, $context, $hook, $offset, $pagelimit);
                 break;
+
+            case 'entry':
+                $printpivot = false;
+                $entry = glossary_get_entry_by_id($hook);
+                $canapprove = has_capability('mod/glossary:approve', $context);
+                if ($entry && ($entry->glossaryid == $glossary->id || $entry->sourceglossaryid != $glossary->id)
+                        && (!empty($entry->approved) || $entry->userid == $USER->id || $canapprove)) {
+                    $count = 1;
+                    $allentries = array($entry);
+                } else {
+                    $count = 0;
+                    $allentries = array();
                 }
-            }
-        break;
-        }
-        
-        $sqlwhere   = "WHERE (ge.glossaryid = $glossary->id or ge.sourceglossaryid = $glossary->id) AND
-                             (ge.approved != 0 $userid)
-                              $where";
-        switch ( $tab ) {
-        case GLOSSARY_DATE_VIEW: 
-            $sqlorderby = "ORDER BY $sqlsortkey $sqlsortorder";
-        break;
-        
-        case GLOSSARY_STANDARD_VIEW: 
-            $sqlorderby = "ORDER BY ge.concept";
-        default:
-        break;
-        }
-    break;
-    } 
-    $count = count_records_sql("select count(*) $sqlfrom $sqlwhere");
+                unset($entry, $canapprove);
+                break;
 
-    $sqllimit = '';
-    
-    if ( $offset >= 0 ) {
- 	    switch ($CFG->dbtype) {
-        case 'postgres7':
-     		$sqllimit = " LIMIT $entriesbypage OFFSET $offset";
+            case 'letter':
+            default:
+                list($allentries, $count) = glossary_get_entries_by_letter($glossary, $context, $hook, $offset, $pagelimit);
+                break;
+        }
         break;
-        case 'mysql':
-     		$sqllimit = " LIMIT $offset, $entriesbypage";
-        break;
-        }    
-    }
-
-    $allentries = get_records_sql("$sqlselect $sqlfrom $sqlwhere $sqlorderby $sqllimit");
-?>
+}

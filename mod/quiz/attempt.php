@@ -1,253 +1,133 @@
-<?PHP  // $Id$
+<?php
+// This file is part of Moodle - http://moodle.org/
+//
+// Moodle is free software: you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// Moodle is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU General Public License for more details.
+//
+// You should have received a copy of the GNU General Public License
+// along with Moodle.  If not, see <http://www.gnu.org/licenses/>.
 
-// This page prints a particular instance of quiz
+/**
+ * This script displays a particular page of a quiz attempt that is in progress.
+ *
+ * @package   mod_quiz
+ * @copyright 1999 onwards Martin Dougiamas  {@link http://moodle.com}
+ * @license   http://www.gnu.org/copyleft/gpl.html GNU GPL v3 or later
+ */
 
-    require_once("../../config.php");
-    require_once("lib.php");
+require_once(__DIR__ . '/../../config.php');
+require_once($CFG->dirroot . '/mod/quiz/locallib.php');
 
-    optional_variable($id);    // Course Module ID, or
-    optional_variable($q);     // quiz ID
+// Look for old-style URLs, such as may be in the logs, and redirect them to startattemtp.php.
+if ($id = optional_param('id', 0, PARAM_INT)) {
+    redirect($CFG->wwwroot . '/mod/quiz/startattempt.php?cmid=' . $id . '&sesskey=' . sesskey());
+} else if ($qid = optional_param('q', 0, PARAM_INT)) {
+    if (!$cm = get_coursemodule_from_instance('quiz', $qid)) {
+        print_error('invalidquizid', 'quiz');
+    }
+    redirect(new moodle_url('/mod/quiz/startattempt.php',
+            array('cmid' => $cm->id, 'sesskey' => sesskey())));
+}
 
-    if ($id) {
-        if (! $cm = get_record("course_modules", "id", $id)) {
-            error("Course Module ID was incorrect");
-        }
-    
-        if (! $course = get_record("course", "id", $cm->course)) {
-            error("Course is misconfigured");
-        }
-    
-        if (! $quiz = get_record("quiz", "id", $cm->instance)) {
-            error("Course module is incorrect");
-        }
+// Get submitted parameters.
+$attemptid = required_param('attempt', PARAM_INT);
+$page = optional_param('page', 0, PARAM_INT);
 
+$attemptobj = quiz_attempt::create($attemptid);
+$page = $attemptobj->force_page_number_into_range($page);
+$PAGE->set_url($attemptobj->attempt_url(null, $page));
+
+// Check login.
+require_login($attemptobj->get_course(), false, $attemptobj->get_cm());
+
+// Check that this attempt belongs to this user.
+if ($attemptobj->get_userid() != $USER->id) {
+    if ($attemptobj->has_capability('mod/quiz:viewreports')) {
+        redirect($attemptobj->review_url(null, $page));
     } else {
-        if (! $quiz = get_record("quiz", "id", $q)) {
-            error("Course module is incorrect");
-        }
-        if (! $course = get_record("course", "id", $quiz->course)) {
-            error("Course is misconfigured");
-        }
-        if (! $cm = get_coursemodule_from_instance("quiz", $quiz->id, $course->id)) {
-            error("Course Module ID was incorrect");
-        }
+        throw new moodle_quiz_exception($attemptobj->get_quizobj(), 'notyourattempt');
+    }
+}
+
+// Check capabilities and block settings.
+if (!$attemptobj->is_preview_user()) {
+    $attemptobj->require_capability('mod/quiz:attempt');
+    if (empty($attemptobj->get_quiz()->showblocks)) {
+        $PAGE->blocks->show_only_fake_blocks();
     }
 
-    require_login($course->id);
+} else {
+    navigation_node::override_active_url($attemptobj->start_attempt_url());
+}
 
+// If the attempt is already closed, send them to the review page.
+if ($attemptobj->is_finished()) {
+    redirect($attemptobj->review_url(null, $page));
+} else if ($attemptobj->get_state() == quiz_attempt::OVERDUE) {
+    redirect($attemptobj->summary_url());
+}
 
-/// Set number for next attempt:
+// Check the access rules.
+$accessmanager = $attemptobj->get_access_manager(time());
+$accessmanager->setup_attempt_page($PAGE);
+$output = $PAGE->get_renderer('mod_quiz');
+$messages = $accessmanager->prevent_access();
+if (!$attemptobj->is_preview_user() && $messages) {
+    print_error('attempterror', 'quiz', $attemptobj->view_url(),
+            $output->access_messages($messages));
+}
+if ($accessmanager->is_preflight_check_required($attemptobj->get_attemptid())) {
+    redirect($attemptobj->start_attempt_url(null, $page));
+}
 
-    if ($attempts = quiz_get_user_attempts($quiz->id, $USER->id)) {
-        $attemptnumber = 2;
-        foreach ($attempts as $attempt) {
-            if ($attempt->attempt >= $attemptnumber) {
-                $attemptnumber = $attempt->attempt + 1;
-            }
-        }
-    } else {
-        $attemptnumber = 1;
-    }
+// Set up auto-save if required.
+$autosaveperiod = get_config('quiz', 'autosaveperiod');
+if ($autosaveperiod) {
+    $PAGE->requires->yui_module('moodle-mod_quiz-autosave',
+            'M.mod_quiz.autosave.init', array($autosaveperiod));
+}
 
-    $strattemptnum = get_string("attempt", "quiz", $attemptnumber);
+// Log this page view.
+$attemptobj->fire_attempt_viewed_event();
 
+// Get the list of questions needed by this page.
+$slots = $attemptobj->get_slots($page);
 
-// Print the page header
+// Check.
+if (empty($slots)) {
+    throw new moodle_quiz_exception($attemptobj->get_quizobj(), 'noquestionsfound');
+}
 
-    if ($course->category) {
-        $navigation = "<A HREF=\"../../course/view.php?id=$course->id\">$course->shortname</A> ->";
-    }
+// Update attempt page, redirecting the user if $page is not valid.
+if (!$attemptobj->set_currentpage($page)) {
+    redirect($attemptobj->start_attempt_url(null, $attemptobj->get_currentpage()));
+}
 
-    $strquizzes = get_string("modulenameplural", "quiz");
-    $strquiz  = get_string("modulename", "quiz");
+// Initialise the JavaScript.
+$headtags = $attemptobj->get_html_head_contributions($page);
+$PAGE->requires->js_init_call('M.mod_quiz.init_attempt_form', null, false, quiz_get_js_module());
 
-    print_header("$course->shortname: $quiz->name", "$course->fullname",
-                 "$navigation <A HREF=index.php?id=$course->id>$strquizzes</A> -> 
-                  <A HREF=\"view.php?id=$cm->id\">$quiz->name</A> -> $strattemptnum", 
-                  "", "", true);
+// Arrange for the navigation to be displayed in the first region on the page.
+$navbc = $attemptobj->get_navigation_panel($output, 'quiz_attempt_nav_panel', $page);
+$regions = $PAGE->blocks->get_regions();
+$PAGE->blocks->add_fake_block($navbc, reset($regions));
 
-    echo '<div id="overDiv" style="position:absolute; visibility:hidden; z-index:1000;"></div>'; // for overlib
+$title = get_string('attempt', 'quiz', $attemptobj->get_attempt_number());
+$headtags = $attemptobj->get_html_head_contributions($page);
+$PAGE->set_title($attemptobj->get_quiz_name());
+$PAGE->set_heading($attemptobj->get_course()->fullname);
 
-/// Check availability
+if ($attemptobj->is_last_page($page)) {
+    $nextpage = -1;
+} else {
+    $nextpage = $page + 1;
+}
 
-    if ($quiz->attempts and $attempts and count($attempts) >= $quiz->attempts) {
-        error("Sorry, you've had $quiz->attempts attempts already.", "view.php?id=$cm->id");
-    }
-
-    $timenow = time();
-    $available = ($quiz->timeopen < $timenow and $timenow < $quiz->timeclose);
-
-/// Check to see if they are submitting answers
-    if ($rawanswers = data_submitted()) {
-
-        $rawanswers = (array)$rawanswers;
-
-        $shuffleorder = NULL;
-
-        unset($rawanswers["q"]);  // quiz id
-        if (! count($rawanswers)) {
-            print_heading(get_string("noanswers", "quiz"));
-            print_continue("attempt.php?q=$quiz->id");
-            exit;
-        }   
-
-        if (!$questions = get_records_list("quiz_questions", "id", $quiz->questions)) {
-            error("No questions found!");
-        }
-
-        foreach ($rawanswers as $key => $value) {       // Parse input for question -> answers
-
-            if (ereg('^q([0-9]+)$', $key, $keyregs)) { // It's a real question number, not a coded one
-                $questions[$keyregs[1]]->answer[] = trim($value);
-
-            } else if (ereg('^q([0-9]+)rq([0-9]+)$', $key, $keyregs)) { // Random Question information
-                $questions[$keyregs[1]]->random = $keyregs[2];
-
-            } else if (ereg('^q([0-9]+)a([0-9]+)$', $key, $keyregs)) { // Checkbox style multiple answers
-                $questions[$keyregs[1]]->answer[] = $keyregs[2];
-
-            } else if (ereg('^q([0-9]+)r([0-9]+)$', $key, $keyregs)) { // Random-style answers
-                $questions[$keyregs[1]]->answer[] = "$keyregs[2]-$value";
-        
-            } else if (ereg('^q([0-9]+)ma([0-9]+)$', $key, $keyregs)) { // Multi-answer questions
-                $questions[$keyregs[1]]->answer[] = "$keyregs[2]-$value";
-
-            } else if ('shuffleorder' == $key) {
-                $shuffleorder = explode(",", $value);   // Actual order questions were given in
-            
-            } else {  // Useful for debugging new question types.  Must be last.
-                error("Answer received for non-existent question ($key -> $value)");
-            }
-        }
-
-        if (!$result = quiz_grade_attempt_results($quiz, $questions)) {
-            error("Could not grade your quiz attempt!");
-        }
-
-        if ($attempt = quiz_save_attempt($quiz, $questions, $result, $attemptnumber)) {
-            add_to_log($course->id, "quiz", "submit", 
-                       "review.php?id=$cm->id&attempt=$attempt->id", "$quiz->id", $cm->id);
-        } else {
-            notice(get_string("alreadysubmitted", "quiz"), "view.php?id=$cm->id");
-            print_footer($course);
-            exit;
-        }
-
-        if (! quiz_save_best_grade($quiz, $USER->id)) {
-            error("Sorry! Could not calculate your best grade!");
-        }
-
-        $strgrade = get_string("grade");
-        $strscore = get_string("score", "quiz");
-
-        if ($quiz->grade) {
-            print_heading("$strscore: $result->sumgrades/$quiz->sumgrades ($result->percentage %)");
-            print_heading("$strgrade: $result->grade/$quiz->grade");
-        }
-
-        print_continue("view.php?id=$cm->id");
-
-        if ($quiz->feedback) {
-            $quiz->shuffleanswers = false;       // Never shuffle answers in feedback
-            quiz_print_quiz_questions($quiz, $result, $questions, $shuffleorder);
-            print_continue("view.php?id=$cm->id");
-        }
-
-        print_footer($course);
-
-        exit;
-    }
-
-
-/// Print the quiz page
-
-    if (isguest()) {
-        print_heading(get_string("guestsno", "quiz"));
-        print_footer($course);
-        exit;
-    }
-
-/// Actually seeing the questions marks the start of an attempt
- 
-    if (!$unfinished = quiz_get_user_attempt_unfinished($quiz->id, $USER->id)) {
-        if ($newattemptid = quiz_start_attempt($quiz->id, $USER->id, $attemptnumber)) {
-            add_to_log($course->id, "quiz", "attempt", 
-                       "review.php?id=$cm->id&attempt=$newattemptid", "$quiz->id", $cm->id);
-        } else {
-            error("Sorry! Could not start the quiz (could not save starting time)");
-        }
-    }
-
-/// First print the headings and so on
-
-    print_heading($quiz->name);
-
-    if (!$available) {
-        error("Sorry, this quiz is not available", "view.php?id=$cm->id");
-    }
-
-    print_heading(get_string("attempt", "quiz", $attemptnumber));
-    print_simple_box(format_text($quiz->intro), "CENTER");
-
-
-/// Add the javascript timer in the title bar if the closing time appears close
-
-    $secondsleft = $quiz->timeclose - time();
-    if ($secondsleft > 0 and $secondsleft < 24*3600) {  // less than a day remaining
-        include("jsclock.php");
-    }
-
-
-/// Print all the questions
-
-    echo "<br />";
-
-    $result = NULL;     // Default
-    $questions = NULL;  // Default
-    if ($quiz->attemptonlast && !empty($attempts)) {
-        $latestfinishedattempt->attempt = 0;
-        foreach ($attempts as $attempt) {
-            if ($attempt->timefinish
-                && $attempt->attempt > $latestfinishedattempt->attempt)
-            {
-                $latestfinishedattempt = $attempt;
-            }
-        }
-        if ($latestfinishedattempt->attempt > 0
-            and $questions =
-                    quiz_get_attempt_responses($latestfinishedattempt))
-        {
-            // An previous attempt to continue on is found:
-            quiz_remove_unwanted_questions($questions, $quiz); // In case the quiz has been changed
-
-            if (!($result = quiz_grade_attempt_results($quiz, $questions))) {
-                // No results, reset to defaults:
-                $questions = NULL;
-                $result = NULL;
-
-            } else {
-                // We're on, latest attempt responses are to be included.
-                // In order to have this accomplished by
-                // the method quiz_print_quiz_questions we need to
-                // temporarilly change some of the $quiz attributes
-                // and remove some of the information from result.
-
-                $quiz->correctanswers = false; // Not a good idea to show them, huh?
-                $result->feedback = array(); // Not to be printed
-                $result->attemptbuildsonthelast = true;
-            }
-            
-        } else {
-            // No latest attempt, or latest attempt was empty - Reset to defaults
-            $questions = NULL;
-        }
-    }
-    if (! quiz_print_quiz_questions($quiz, $result, $questions)) {
-        print_continue("view.php?id=$cm->id");
-    }
-
-
-/// Finish the page
-    print_footer($course);
-
-?>
+echo $output->attempt_page($attemptobj, $page, $accessmanager, $messages, $slots, $id, $nextpage);

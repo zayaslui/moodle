@@ -1,89 +1,58 @@
-<?PHP /// $Id$
-      /// help.php - prints a very simple page and includes a
-      ///            page content or a string from elsewhere
-      ///            Usually this will appear in a popup 
-      ///            See helpbutton() in lib/moodlelib.php
+<?php
 
-    require_once("config.php");
+// This file is part of Moodle - http://moodle.org/
+//
+// Moodle is free software: you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// Moodle is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU General Public License for more details.
+//
+// You should have received a copy of the GNU General Public License
+// along with Moodle.  If not, see <http://www.gnu.org/licenses/>.
 
-    optional_variable($file, "");
-    optional_variable($text, "No text to display");
-    optional_variable($module, "moodle");
+/**
+ * Displays help via AJAX call or in a new page
+ *
+ * Use {@link core_renderer::help_icon()} or {@link addHelpButton()} to display
+ * the help icon.
+ *
+ * @copyright 2002 onwards Martin Dougiamas
+ * @package   core
+ * @license   http://www.gnu.org/copyleft/gpl.html GNU GPL v3 or later
+ */
 
-    print_header();
+define('NO_MOODLE_COOKIES', true);
 
-    if (detect_munged_arguments("$module/$file")) {
-        error("Filenames contain illegal characters!");
-    }
+require_once(__DIR__ . '/config.php');
 
-    print_simple_box_start("center", "96%");
+$identifier = required_param('identifier', PARAM_STRINGID);
+$component  = required_param('component', PARAM_COMPONENT);
+$lang       = optional_param('lang', 'en', PARAM_LANG);
 
-    $helpfound = false;
-    $langs = array(current_language(), get_string("parentlanguage"), "en");  // Fallback
+// We don't actually modify the session here as we have NO_MOODLE_COOKIES set.
+$SESSION->lang = $lang;
 
-    if (!empty($file)) {
-        foreach ($langs as $lang) {
-            if (empty($lang)) {
-                continue;
-            }
-            if ($module == "moodle") {
-                $filepath = "$CFG->dirroot/lang/$lang/help/$file";
-            } else {
-                $filepath = "$CFG->dirroot/lang/$lang/help/$module/$file";
-            }
-  
-            if (file_exists("$filepath")) {
-                $helpfound = true;
-                include("$filepath");   // The actual helpfile
+$PAGE->set_url('/help.php');
+$PAGE->set_pagelayout('popup');
+$PAGE->set_context(context_system::instance());
 
-                if ($module == "moodle" && ($file == "index.html" || $file == "mods.html")) {
-                    // include file for each module
-
-                    if (!$modules = get_records("modules", "visible", 1)) {
-                        error("No modules found!!");        // Should never happen
-                    }
-
-                    foreach ($modules as $mod) {
-                        $strmodulename = get_string("modulename", "$mod->name");
-                        $modulebyname[$strmodulename] = $mod;
-                    }
-                    ksort($modulebyname);
-
-                    foreach ($modulebyname as $mod) {
-                        foreach ($langs as $lang) {
-                            if (empty($lang)) {
-                                continue;
-                            }
-                            $filepath = "$CFG->dirroot/lang/$lang/help/$mod->name/$file";
-
-                            if (file_exists("$filepath")) {
-                                include("$filepath");   // The actual helpfile
-                                break;
-                            }
-                        }
-                    }
-                }
-                break;
-            }
-        }
-    } else {
-        echo "<p>";
-        echo clean_text($text);
-        echo "</p>";
-        $helpfound = true;
-    }
-
-    print_simple_box_end();
-
-    if (!$helpfound) {
-        $file = clean_text($file);  // Keep it clean!
-        notify("Help file '$file' could not be found!");
-    }
-
-    close_window_button();
-
-    echo "<center><p><a href=\"help.php?file=index.html\">".get_string("helpindex")."</a><p></center>";
-?>
-</body>
-</html>
-
+$data = get_formatted_help_string($identifier, $component, false);
+if (!empty($data->heading)) {
+    $PAGE->set_title($data->heading);
+} else {
+    $PAGE->set_title(get_string('help'));
+}
+echo $OUTPUT->header();
+if (!empty($data->heading)) {
+    echo $OUTPUT->heading($data->heading, 1, 'helpheading');
+}
+echo $data->text;
+if (isset($data->completedoclink)) {
+    echo $data->completedoclink;
+}
+echo $OUTPUT->footer();

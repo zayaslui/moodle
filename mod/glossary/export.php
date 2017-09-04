@@ -1,76 +1,73 @@
-<?php   // $Id$
+<?php
 
-    require_once("../../config.php");
-    require_once("lib.php");
-    global $CFG, $USER;
-    
-    require_variable($id);           // Course Module ID
+require_once("../../config.php");
+require_once("lib.php");
 
-    optional_variable($l,"");
-    optional_variable($cat,0);
+$id = required_param('id', PARAM_INT);      // Course Module ID
 
-    if (! $cm = get_record("course_modules", "id", $id)) {
-        error("Course Module ID was incorrect");
-    } 
-    
-    if (! $course = get_record("course", "id", $cm->course)) {
-        error("Course is misconfigured");
-    } 
-    
-    if (! $glossary = get_record("glossary", "id", $cm->instance)) {
-        error("Course module is incorrect");
-    } 
-    
-    require_login($course->id);    
-    if (!isteacher($course->id)) {
-        error("You must be a teacher to use this page.");
-    } 
+$mode= optional_param('mode', '', PARAM_ALPHA);           // term entry cat date letter search author approval
+$hook= optional_param('hook', '', PARAM_CLEAN);           // the term, entry, cat, etc... to look for based on mode
+$cat = optional_param('cat',0, PARAM_ALPHANUM);
 
-    $strglossaries = get_string("modulenameplural", "glossary");
-    $strglossary = get_string("modulename", "glossary");
-    $strallcategories = get_string("allcategories", "glossary");
-    $straddentry = get_string("addentry", "glossary");
-    $strnoentries = get_string("noentries", "glossary");
-    $strsearchconcept = get_string("searchconcept", "glossary");
-    $strsearchindefinition = get_string("searchindefinition", "glossary");
-    $strsearch = get_string("search");
-    
-    $navigation = "";
-    if ($course->category) {
-        $navigation = "<a href=\"../../course/view.php?id=$course->id\">$course->shortname</a> ->";
-        require_login($course->id);
+$url = new moodle_url('/mod/glossary/export.php', array('id'=>$id));
+if ($cat !== 0) {
+    $url->param('cat', $cat);
+}
+if ($mode !== '') {
+    $url->param('mode', $mode);
+}
+
+$PAGE->set_url($url);
+
+if (! $cm = get_coursemodule_from_id('glossary', $id)) {
+    print_error('invalidcoursemodule');
+}
+
+if (! $course = $DB->get_record("course", array("id"=>$cm->course))) {
+    print_error('coursemisconf');
+}
+
+if (! $glossary = $DB->get_record("glossary", array("id"=>$cm->instance))) {
+    print_error('invalidid', 'glossary');
+}
+
+require_login($course, false, $cm);
+
+$context = context_module::instance($cm->id);
+require_capability('mod/glossary:export', $context);
+
+$strglossaries = get_string("modulenameplural", "glossary");
+$strglossary = get_string("modulename", "glossary");
+$strallcategories = get_string("allcategories", "glossary");
+$straddentry = get_string("addentry", "glossary");
+$strnoentries = get_string("noentries", "glossary");
+$strsearchindefinition = get_string("searchindefinition", "glossary");
+$strsearch = get_string("search");
+$strexportfile = get_string("exportfile", "glossary");
+$strexportentries = get_string('exportentriestoxml', 'glossary');
+
+$PAGE->set_url('/mod/glossary/export.php', array('id'=>$cm->id));
+$PAGE->navbar->add($strexportentries);
+$PAGE->set_title($glossary->name);
+$PAGE->set_heading($course->fullname);
+
+echo $OUTPUT->header();
+echo $OUTPUT->heading($strexportentries);
+echo $OUTPUT->box_start('glossarydisplay generalbox');
+$exporturl = moodle_url::make_pluginfile_url($context->id, 'mod_glossary', 'export', 0, "/$cat/", 'export.xml', true);
+
+?>
+    <form action="<?php echo $exporturl->out(); ?>" method="post">
+        <input class="btn btn-primary" type="submit" value="<?php p($strexportfile)?>" />
+    </form>
+<?php
+    // don't need cap check here, we share with the general export.
+    if (!empty($CFG->enableportfolios) && $DB->count_records('glossary_entries', array('glossaryid' => $glossary->id))) {
+        require_once($CFG->libdir . '/portfoliolib.php');
+        $button = new portfolio_add_button();
+        $button->set_callback_options('glossary_full_portfolio_caller', array('id' => $cm->id), 'mod_glossary');
+        $button->render();
     }
-
-    print_header(strip_tags("$course->shortname: $glossary->name"), "$course->fullname",
-        "$navigation <A HREF=index.php?id=$course->id>$strglossaries</A> -> $glossary->name",
-        "", "", true, update_module_button($cm->id, $course->id, $strglossary),
-        navmenu($course, $cm));
-    
-    echo '<p align="center"><font size="3"><b>' . stripslashes_safe($glossary->name);
-    echo '</b></font></p>';
-
-/// Info box
-
-    if ( $glossary->intro ) {
-        print_simple_box_start('center','70%');
-        echo format_text($glossary->intro);
-        print_simple_box_end();
-    }
-
-/// Tabbed browsing sections
-    $lastl   = $l;
-    $lastcat = $cat;
-    $tab = GLOSSARY_EXPORT_VIEW;
-    include("tabs.html");
-
-    glossary_generate_export_file($glossary,$lastl,$lastcat);
-    print_string("glosssaryexported","glossary");
-
-    $ffurl = "/$course->id/glossary/" . clean_filename(strip_tags($glossary->name)) ."/glossary.xml";
-    if ($CFG->slasharguments) {
-        $ffurl = "../../file.php$ffurl" ;
-    } else {
-        $ffurl = "../../file.php?file=$ffurl";
-    }
-    echo '<p><center><a href="' . $ffurl . '" target=_blank>' . get_string("exportedfile","glossary") .  '</a></center><p>'
+    echo $OUTPUT->box_end();
+    echo $OUTPUT->footer();
 ?>

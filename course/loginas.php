@@ -1,87 +1,90 @@
-<?PHP // $Id$
-      // Allows a teacher/admin to login as another user (in stealth mode)
+<?php
+// Allows a teacher/admin to login as another user (in stealth mode).
 
-    require_once("../config.php");
-    require_once("lib.php");
+require_once('../config.php');
+require_once('lib.php');
 
-    require_variable($id);     // course id
-    optional_variable($user);   // login as this user
-    optional_variable($return); // return to being the real user again
+$id       = optional_param('id', SITEID, PARAM_INT);   // course id
+$redirect = optional_param('redirect', 0, PARAM_BOOL);
 
-    if (! $course = get_record("course", "id", $id)) {
-        error("Course ID was incorrect");
+$url = new moodle_url('/course/loginas.php', array('id'=>$id));
+$PAGE->set_url($url);
+
+// Reset user back to their real self if needed, for security reasons you need to log out and log in again.
+if (\core\session\manager::is_loggedinas()) {
+    require_sesskey();
+    require_logout();
+
+    // We can not set wanted URL here because the session is closed.
+    redirect(new moodle_url($url, array('redirect'=>1)));
+}
+
+if ($redirect) {
+    if ($id and $id != SITEID) {
+        $SESSION->wantsurl = "$CFG->wwwroot/course/view.php?id=".$id;
+    } else {
+        $SESSION->wantsurl = "$CFG->wwwroot/";
     }
 
-    if ($course->category) {
-        require_login($course->id);
+    redirect(get_login_url());
+}
+
+// Try log in as this user.
+$userid = required_param('user', PARAM_INT);
+
+require_sesskey();
+$course = $DB->get_record('course', array('id'=>$id), '*', MUST_EXIST);
+
+// User must be logged in.
+
+$systemcontext = context_system::instance();
+$coursecontext = context_course::instance($course->id);
+
+require_login();
+
+if (has_capability('moodle/user:loginas', $systemcontext)) {
+    if (is_siteadmin($userid)) {
+        print_error('nologinas');
     }
+    $context = $systemcontext;
+    $PAGE->set_context($context);
+} else {
+    require_login($course);
+    require_capability('moodle/user:loginas', $coursecontext);
+    if (is_siteadmin($userid)) {
+        print_error('nologinas');
+    }
+    if (!is_enrolled($coursecontext, $userid)) {
+        print_error('usernotincourse');
+    }
+    $context = $coursecontext;
 
-    if ($return and $USER->realuser) {
-        $USER = get_user_info_from_db("id", $USER->realuser);
-        $USER->loggedin = true;
-        $USER->site = $CFG->wwwroot;
-
-        if (isset($SESSION->oldcurrentgroup)) {      // Restore previous "current group"
-            $SESSION->currentgroup[$course->id] = $SESSION->oldcurrentgroup;
-            unset($SESSION->oldcurrentgroup);
+    // Check if course has SEPARATEGROUPS and user is part of that group.
+    if (groups_get_course_groupmode($course) == SEPARATEGROUPS &&
+            !has_capability('moodle/site:accessallgroups', $context)) {
+        $samegroup = false;
+        if ($groups = groups_get_all_groups($course->id, $USER->id)) {
+            foreach ($groups as $group) {
+                if (groups_is_member($group->id, $userid)) {
+                    $samegroup = true;
+                    break;
+                }
+            }
         }
-        if (isset($SESSION->oldtimeaccess)) {        // Restore previous timeaccess settings
-            $USER->timeaccess = $SESSION->oldtimeaccess;
-            unset($SESSION->oldtimeaccess);
+        if (!$samegroup) {
+            print_error('nologinas');
         }
-
-        redirect($_SERVER["HTTP_REFERER"]);
-        exit;
     }
+}
 
-    // $user must be defined to go on
+// Login as this user and return to course home page.
+\core\session\manager::loginas($userid, $context);
+$newfullname = fullname($USER, true);
 
-    if (!isteacher($course->id)) {
-        error("Only teachers can use this page!");
-    }
+$strloginas    = get_string('loginas');
+$strloggedinas = get_string('loggedinas', '', $newfullname);
 
-    if ($course->category and !isstudent($course->id, $user) and !isadmin()) {
-        error("This student is not in this course!");
-    }
-
-    if (iscreator($user)) {
-        error("You can not login as this person!");
-    }
-
-    // Remember current timeaccess settings for later
-
-    if (isset($USER->timeaccess)) {
-        $SESSION->oldtimeaccess = $USER->timeaccess;
-    }
-
-    // Login as this student and return to course home page.
-
-    $teacher_name = fullname($USER, true);
-    $teacher_id   = "$USER->id";
-
-    $USER = get_user_info_from_db("id", $user);    // Create the new USER object with all details
-    $USER->loggedin = true;
-    $USER->site = $CFG->wwwroot;
-    $USER->realuser = $teacher_id;
-
-    if (isset($SESSION->currentgroup[$course->id])) {    // Remember current setting for later
-        $SESSION->oldcurrentgroup = $SESSION->currentgroup[$course->id];
-        unset($SESSION->currentgroup[$course->id]);
-    }
-
-    set_moodle_cookie($USER->username);
-    $student_name = fullname($USER, true);
-
-    add_to_log($course->id, "course", "loginas", "../user/view.php?id=$course->id&user=$user", "$teacher_name -> $student_name");
-
-
-    $strloginas    = get_string("loginas");
-    $strloggedinas = get_string("loggedinas", "", $student_name);
-
-    print_header("$course->fullname: $strloginas $student_name", "$course->fullname", 
-                 "<A HREF=\"$CFG->wwwroot/course/view.php?id=$course->id\">$course->shortname</A> -> 
-                  $strloginas $student_name");
-    notice($strloggedinas, "$CFG->wwwroot/course/view.php?id=$course->id");
-
-
-?>
+$PAGE->set_title($strloggedinas);
+$PAGE->set_heading($course->fullname);
+$PAGE->navbar->add($strloggedinas);
+notice($strloggedinas, "$CFG->wwwroot/course/view.php?id=$course->id");

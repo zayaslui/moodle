@@ -1,122 +1,120 @@
-<?PHP // $Id$
-    //This function provides automatic linking to
-    //activities when its name (title) is found inside every Moodle text
-    //It's based in the glosssary filter by Williams Castillo
-    //Modifications by stronk7.
+<?php
 
-    $textfilter_function='activitynames_filter';
+// This file is part of Moodle - http://moodle.org/
+//
+// Moodle is free software: you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// Moodle is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU General Public License for more details.
+//
+// You should have received a copy of the GNU General Public License
+// along with Moodle.  If not, see <http://www.gnu.org/licenses/>.
 
-    if (function_exists($textfilter_function)) {
-        return;
-    }
+/**
+ * This filter provides automatic linking to
+ * activities when its name (title) is found inside every Moodle text
+ *
+ * @package    filter
+ * @subpackage activitynames
+ * @copyright  2004 onwards Eloy Lafuente (stronk7) {@link http://stronk7.com}
+ * @license    http://www.gnu.org/copyleft/gpl.html GNU GPL v3 or later
+ */
 
-    function activitynames_filter($courseid, $text) {
+defined('MOODLE_INTERNAL') || die();
 
-        global $CFG;
+/**
+ * Activity name filtering
+ */
+class filter_activitynames extends moodle_text_filter {
+    // Trivial-cache - keyed on $cachedcourseid and $cacheduserid.
+    static $activitylist = null;
+    static $cachedcourseid;
+    static $cacheduserid;
 
-        if (empty($courseid)) {
-            if ($site = get_site()) {
-                $courseid = $site->id;
-            }
+    function filter($text, array $options = array()) {
+        global $USER; // Since 2.7 we can finally start using globals in filters.
+
+        $coursectx = $this->context->get_course_context(false);
+        if (!$coursectx) {
+            return $text;
         }
+        $courseid = $coursectx->instanceid;
 
-        $course = get_record("course","id",$courseid);
-        $modinfo = unserialize($course->modinfo);
+        // Initialise/invalidate our trivial cache if dealing with a different course.
+        if (!isset(self::$cachedcourseid) || self::$cachedcourseid !== (int)$courseid) {
+            self::$activitylist = null;
+        }
+        self::$cachedcourseid = (int)$courseid;
+        // And the same for user id.
+        if (!isset(self::$cacheduserid) || self::$cacheduserid !== (int)$USER->id) {
+            self::$activitylist = null;
+        }
+        self::$cacheduserid = (int)$USER->id;
 
-        if (!empty($modinfo)) {
-            $cm = '';
-            foreach ($modinfo as $activity) {
-                //Exclude labels and hidden items
-                if ($activity->mod != "label" && $activity->visible) {
-                    $title = strip_tags(urldecode($activity->name));
-                    $title = str_replace('"', "'", $title);
-                    $href_tag_begin = "<a class=\"autolink\" title=\"$title\" href=\"$CFG->wwwroot/mod/$activity->mod/view.php?id=$activity->cm\">";
-                    $currentname = urldecode($activity->name);
-                    if ($currentname = trim($currentname)) {
-                        //Avoid integers < 1000 to be linked. See bug 1441.
-                        $intcurrent = intval($currentname);
-                        if (!(!empty($intcurrent) && strval($intcurrent) == $currentname && $intcurrent < 1000)) {
-                            $text = activity_link_names($text,$currentname,$href_tag_begin, "</a>");
+        /// It may be cached
+
+        if (is_null(self::$activitylist)) {
+            self::$activitylist = array();
+
+            $modinfo = get_fast_modinfo($courseid);
+            if (!empty($modinfo->cms)) {
+                self::$activitylist = array(); // We will store all the created filters here.
+
+                // Create array of visible activities sorted by the name length (we are only interested in properties name and url).
+                $sortedactivities = array();
+                foreach ($modinfo->cms as $cm) {
+                    // Use normal access control and visibility, but exclude labels and hidden activities.
+                    if ($cm->visible and $cm->has_view() and $cm->uservisible) {
+                        $sortedactivities[] = (object)array(
+                            'name' => $cm->name,
+                            'url' => $cm->url,
+                            'id' => $cm->id,
+                            'namelen' => -strlen($cm->name), // Negative value for reverse sorting.
+                        );
+                    }
+                }
+                // Sort activities by the length of the activity name in reverse order.
+                core_collator::asort_objects_by_property($sortedactivities, 'namelen', core_collator::SORT_NUMERIC);
+
+                foreach ($sortedactivities as $cm) {
+                    $title = s(trim(strip_tags($cm->name)));
+                    $currentname = trim($cm->name);
+                    $entitisedname  = s($currentname);
+                    // Avoid empty or unlinkable activity names.
+                    if (!empty($title)) {
+                        $href_tag_begin = html_writer::start_tag('a',
+                                array('class' => 'autolink', 'title' => $title,
+                                    'href' => $cm->url));
+                        self::$activitylist[$cm->id] = new filterobject($currentname, $href_tag_begin, '</a>', false, true);
+                        if ($currentname != $entitisedname) {
+                            // If name has some entity (&amp; &quot; &lt; &gt;) add that filter too. MDL-17545.
+                            self::$activitylist[$cm->id.'-e'] = new filterobject($entitisedname, $href_tag_begin, '</a>', false, true);
                         }
                     }
                 }
             }
         }
-        return $text;
-    }
-    
-    function activity_link_names($text,$name,$href_tag_begin,$href_tag_end = "</a>") {
 
-        $list_of_words_cp = strip_tags($name);
-
-        $list_of_words_cp = trim($list_of_words_cp,'|');
-
-        $list_of_words_cp = trim($list_of_words_cp);
-
-        $list_of_words_cp = preg_quote($list_of_words_cp,'/');
-
-        $invalidprefixs = "([a-zA-Z0-9])";
-        $invalidsufixs  = "([a-zA-Z0-9])";
-
-        //Avoid seaching in the string if it's inside invalidprefixs and invalidsufixs
-        $words = array();
-        $regexp = '/'.$invalidprefixs.'('.$list_of_words_cp.')|('.$list_of_words_cp.')'.$invalidsufixs.'/is';
-        preg_match_all($regexp,$text,$list_of_words);
-
-        if ($list_of_words) {
-            foreach (array_unique($list_of_words[0]) as $key=>$value) {
-                $words['<*'.$key.'*>'] = $value;
-            }
-            if (!empty($words)) {
-                $text = str_replace($words,array_keys($words),$text);
+        $filterslist = array();
+        if (self::$activitylist) {
+            $cmid = $this->context->instanceid;
+            if ($this->context->contextlevel == CONTEXT_MODULE && isset(self::$activitylist[$cmid])) {
+                // remove filterobjects for the current module
+                $filterslist = array_values(array_diff_key(self::$activitylist, array($cmid => 1, $cmid.'-e' => 1)));
+            } else {
+                $filterslist = array_values(self::$activitylist);
             }
         }
 
-        //Now avoid searching inside the <nolink>tag
-        $excludes = array();
-        preg_match_all('/<nolink>(.+?)<\/nolink>/is',$text,$list_of_excludes);
-        foreach (array_unique($list_of_excludes[0]) as $key=>$value) {
-            $excludes['<+'.$key.'+>'] = $value;
+        if ($filterslist) {
+            return $text = filter_phrases($text, $filterslist);
+        } else {
+            return $text;
         }
-        if (!empty($excludes)) {
-            $text = str_replace($excludes,array_keys($excludes),$text);
-        }
-
-        //Now avoid searching inside links
-        $links = array();
-        preg_match_all('/<A[\s](.+?)>(.+?)<\/A>/is',$text,$list_of_links);
-        foreach (array_unique($list_of_links[0]) as $key=>$value) {
-            $links['<@'.$key.'@>'] = $value;
-        }
-        if (!empty($links)) {
-            $text = str_replace($links,array_keys($links),$text);
-        }
-
-        //Now avoid searching inside every tag
-        $final = array();
-        preg_match_all('/<(.+?)>/is',$text,$list_of_tags);
-        foreach (array_unique($list_of_tags[0]) as $key=>$value) {
-            $final['<|'.$key.'|>'] = $value;
-        }
-        if (!empty($final)) {
-            $text = str_replace($final,array_keys($final),$text);
-        }
-
-        $text = preg_replace('/('.$list_of_words_cp.')/is', $href_tag_begin.'$1'.$href_tag_end,$text);
-
-        //Now rebuild excluded areas
-        if (!empty($final)) {
-            $text = str_replace(array_keys($final),$final,$text);
-        }
-        if (!empty($links)) {
-            $text = str_replace(array_keys($links),$links,$text);
-        }
-        if (!empty($excludes)) {
-            $text = str_replace(array_keys($excludes),$excludes,$text);
-        }
-        if (!empty($words)) {
-            $text = str_replace(array_keys($words),$words,$text);
-        }
-        return $text;
     }
-?>
+}

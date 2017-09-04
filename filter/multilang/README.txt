@@ -1,50 +1,45 @@
-///////////////////////////////////////////////////////////////////////////
-// This program is part of Moodle - Modular Object-Oriented Dynamic      //
-// Learning Environment - http://moodle.com                              //
-//                                                                       //
-//  Multilingual Filter                                                  //
-//  $Id$ //
-//                                                                       //
-///////////////////////////////////////////////////////////////////////////
+To Install it:
+    - Enable if from "Administration/Filters".
 
-This filter implements an XML syntax to provide
-fully multilingual website.  No only the Moodle interface
-can be translated but also the content!
+To Use it:
+    - Create your contents in multiple languages.
+    - Enclose every language content between:
+        <span lang="XX" class="multilang">your_content_here</span><span lang="YY" class="multilang">your_content_other_lang</span>
+    - Test it (by changing your language).
 
-To activate this filter, add a line like this to your
-config.php:
+How it works:
+    - look for "lang blocks" in the code.
+    - for each "lang block":
+        - if there are texts in the currently active language, print them.
+        - else, if there exists texts in the current parent language, print them.
+        - else, print the first language found in the text.
+    - text out of "lang blocks" will be showed always.
 
-   $CFG->textfilter1 = 'filter/multilang/multilang.php';
+Definition of "lang block":
+    Is a collection of lang tags separated only by whitespace chars (space,
+    tab, linefeed or return chars).
 
-Syntax to display a multilingual content:
+One example in action:
+    - This text:
+        <span lang="en" class="multilang">Hello!</span><span lang="es" class="multilang">Hola!</span>
+        This text is common for every language because it's out from any lang block.
+        <span lang="en" class="multilang">Bye!</span><span lang="it" class="multilang">Ciao!</span>
 
- <lang lang="en" format="auto">
- Introduction
- </lang>
+    - Will print, if current language is English:
+        Hello!
+        This text is common for every language because it's out from any lang block.
+        Bye!
 
- <lang lang="es" format="auto">
- Introducción
- </lang>
-
- <lang lang="de" format="auto">
- Einleitung
- </lang>
+    - And, in Spanish, it will print:
+        Hola!
+        This text is common for every language because it's out from any lang block.
+        Bye!
 
 
-///////////////////////////////////////////////////////////////////////////
-//                                                                       //
-// Copyright (C) 2004  Gaëtan Frenoy <gaetan à frenoy.net>               //
-//                                                                       //
-// This program is free software; you can redistribute it and/or modify  //
-// it under the terms of the GNU General Public License as published by  //
-// the Free Software Foundation; either version 2 of the License, or     //
-// (at your option) any later version.                                   //
-//                                                                       //
-// This program is distributed in the hope that it will be useful,       //
-// but WITHOUT ANY WARRANTY; without even the implied warranty of        //
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the         //
-// GNU General Public License for more details:                          //
-//                                                                       //
-//          http://www.gnu.org/copyleft/gpl.html                         //
-//                                                                       //
-///////////////////////////////////////////////////////////////////////////
+Ciao, Eloy :-)
+stronk7@moodle.org
+2005-11-16
+
+Syntax was changed in 1.8, the conversion of existing text is done from admin/multilangupgrade.php
+Ciao, skodak :-)
+2006-12-11
